@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mirror-${IMAGE}
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: image-mirror
+      restartPolicy: Never
+      containers:
+      - name: mirror
+        image: registry.redhat.io/ubi8/skopeo:latest
+        env:
+        - name: HOME
+          value: /tmp/skopeo-home
+        - name: XDG_RUNTIME_DIR
+          value: /tmp/xdg-runtime
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          mkdir -p "${HOME}" "${XDG_RUNTIME_DIR}"
+          TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          skopeo copy --src-tls-verify=true --dest-tls-verify=false \
+            --dest-creds="unused:${TOKEN}" \
+            "docker://${QUAY_REPO}/${IMAGE}:${VERSION}" \
+            "docker://image-registry.openshift-image-registry.svc:5000/${BUILD_NS}/${IMAGE}:${VERSION}"
+          # Also tag as :latest — the setup Job's golden-image import
+          # (bootstrap-golden-image.sh) pulls :latest from the internal
+          # registry, and a missing tag deadlocks the DV import in
+          # ImagePullBackOff.
+          skopeo copy --src-tls-verify=false --dest-tls-verify=false \
+            --src-creds="unused:${TOKEN}" \
+            --dest-creds="unused:${TOKEN}" \
+            "docker://image-registry.openshift-image-registry.svc:5000/${BUILD_NS}/${IMAGE}:${VERSION}" \
+            "docker://image-registry.openshift-image-registry.svc:5000/${BUILD_NS}/${IMAGE}:latest"
+          echo "Mirror complete: ${IMAGE}:${VERSION} (also tagged :latest)"

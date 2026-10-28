@@ -1,0 +1,106 @@
+= Security CTF
+:navtitle: Security CTF
+
+Parked — not part of the workshop; not rendered by Antora. Revive by re-registering this page in modules/ROOT/nav.adoc.
+
+This extended-track module turns the Module 2 control layers into timed challenges.
+Work from the raw OpenShell sandbox environment: the `{raw_gateway_name}`
+gateway and the
+`{raw_sandbox_name}` sandbox from Modules 1-2, with the quickstart policy
+applied. Each challenge states a goal; you produce the evidence that proves the
+control, not just the command output. Facilitators award points for evidence.
+
+*Scoring:* 10 points per challenge, 2 bonus points per challenge for the
+corresponding gateway event. 50 points total plus event bonuses. The Module 2
+answer key is the facilitator's rubric.
+
+Start from the repository root with the raw gateway selected:
+
+[source,bash,subs="attributes+"]
+----
+openshell gateway select {raw_gateway_name}
+openshell --gateway {raw_gateway_name} status
+----
+
+== Challenge 1: Exfiltration attempt (network default-deny)
+
+*Goal:* Prove that an undeclared destination is unreachable and that the denial
+is recorded.
+
+Send a request from the sandbox to a host that is not in the quickstart policy,
+then capture the gateway event that names the destination.
+
+Evidence to show the facilitator:
+
+* the failed request;
+* the gateway event recording the destination, the calling binary, and the
+  denial reason.
+
+== Challenge 2: Smuggled tool (binary binding)
+
+*Goal:* Reach the allowed host with a binary that is not bound to it.
+
+The quickstart policy allows only `/usr/bin/curl` to reach `api.github.com`.
+Attempt the same read with any other binary available in the sandbox, then show
+the policy inspection that explains the denial.
+
+Evidence:
+
+* the failed attempt from the unbound binary;
+* `policy get --full` output showing the `binaries` binding;
+* the gateway event.
+
+== Challenge 3: Filesystem escape (Landlock)
+
+*Goal:* Prove the declared path boundary with positive and negative controls.
+
+Write to an allowed path and to two paths outside the allowlist, then show why
+the denials are Landlock decisions rather than ordinary Unix permissions.
+
+Evidence:
+
+* the allowed write;
+* two denied writes;
+* the failing command output and the world-writable (mode 1777) path
+  comparison that attribute the denials to Landlock rather than ordinary
+  Unix permissions.
+
+== Challenge 4: API abuse (L7 method control)
+
+*Goal:* Show that an allowed host still enforces per-method access.
+
+Perform a GET that succeeds and a POST to the same host and binary that is
+denied, then explain why the HTTP status alone is not proof of enforcement.
+
+Evidence:
+
+* the successful GET;
+* the denied POST;
+* the gateway event naming the method and target path;
+* an explanation of why an upstream GitHub 4xx would not be acceptable
+  evidence.
+
+== Challenge 5: Live lockdown (policy hot-reload)
+
+*Goal:* Add an endpoint to the running sandbox without recreating it, verify
+it, then restore the canonical policy and prove the endpoint is gone.
+
+The in-cluster `http-echo` service is the target host. Any other host must
+remain denied after the restore.
+
+Evidence:
+
+* the effective policy before, during, and after;
+* the successful request while the temporary endpoint was active;
+* the denied request after the restore;
+* confirmation that the sandbox was never recreated.
+
+== Wrap-up
+
+Record the total score with the workshop evidence bundle. The challenges
+exercise the same controls as Module 2; the difference is that participants
+must assemble the proof themselves. A participant who completes all five
+challenges has demonstrated every raw OpenShell control layer without the
+module walkthroughs.
+
+When finished, continue to Cleanup.

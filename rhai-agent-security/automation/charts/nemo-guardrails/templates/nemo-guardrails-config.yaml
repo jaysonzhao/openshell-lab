@@ -1,0 +1,12 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.name }}-config
+  labels:
+    {{- include "nemo-guardrails.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+{{ tpl .Values.config . | indent 4 }}
+  rails.co: |
+{{ tpl .Values.colang . | indent 4 }}

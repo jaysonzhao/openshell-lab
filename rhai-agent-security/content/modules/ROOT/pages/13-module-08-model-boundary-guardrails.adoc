@@ -1,0 +1,815 @@
+= Module 8: Model-Boundary Guardrails
+:navtitle: Model-Boundary Guardrails
+
+This module adds guardrails at the model boundary. OpenShell limits what the
+agent can execute; NeMo Guardrails limits what the model receives and returns.
+You deploy a guardrails server on OpenShift AI with the TrustyAI operator,
+inspect its rails configuration, prove that sensitive input is blocked before
+it reaches the model, and change a rail live.
+
+The important lesson is the boundary itself: the guardrails server is an
+OpenAI-compatible proxy in front of the model. Clients call the guardrails
+server, not the model. Input rails run before the model call, output rails run
+on the response, and the model credential never reaches the caller.
+
+== Technical context
+
+Every request flows through the guardrails server in one direction. Rails are
+checkpoints at fixed stages of that flow:
+
+[mermaid]
+----
+flowchart TD
+    C[Client application] -->|OpenAI-compatible API| S[Guardrails server]
+    S --> IR[Input rails<br>regex, PII, moderation]
+    IR -->|blocked| R[Refusal, HTTP 200]
+    IR -->|allowed| M[Main model call]
+    M --> OR[Output rails]
+    OR -->|blocked| R
+    OR -->|allowed| A[Response to client]
+----
+
+In short: nothing reaches the model except through this checkpoint — and the
+checkpoint is configuration you can read and change.
+
+Three facts follow from this shape, and each exercise proves one of them:
+
+* **Rails are the only path in and out.** A blocked request never reaches the
+  model; the server answers from a canned message. This is why the model
+  credential lives in the guardrails pod, not in any client.
+* **A refusal is a normal HTTP 200 response, not an error.** The client cannot
+  distinguish enforcement from configuration by status code alone. The pass
+  conditions in this module check the response body and the pod logs, not the
+  status.
+* **The rails are configuration, not code.** Which rails run, what they check,
+  and where they sit in the flow all come from the guardrails configuration.
+  Changing enforcement is a configuration change, not a redeployment.
+
+=== The server and the operator
+
+The guardrails server runs as a separate deployment on OpenShift AI. The
+TrustyAI operator manages it from a `NemoGuardrails` custom resource: when the
+CR is created, the operator renders the underlying `Deployment`, `Service`,
+and `ServiceAccount`, injects environment variables from the CR's `env` list,
+and mounts the guardrails configuration from a ConfigMap listed in the CR's
+`nemoConfigs`. You never manage the Deployment directly; desired state lives
+in the CR and the ConfigMap.
+
+The server loads the configuration once at startup. Each pod restart picks up
+the current ConfigMap content, so a configuration change takes effect when the
+operator replaces the pod — not before.
+
+=== The configuration
+
+The configuration has two files, and understanding their split is the key to
+fluency:
+
+* `config.yaml` is the machine-facing definition: the model connection
+  (`models`), rail parameters (`rails.config` — regex patterns, sensitive data
+  entities), and which rails run at each stage (`rails.input.flows`,
+  `rails.output.flows`). The moderation prompts also live here, in the
+  `prompts` section.
+* `rails.co` is the Colang definition of flow behavior: on a rail match, which
+  bot message is sent and whether the flow aborts. Colang is a small
+  state-machine language; the built-in flows follow the same shape a custom
+  flow would.
+
+The rails named in `rails.input.flows` and `rails.output.flows` must resolve
+to a flow definition (built-in or custom) plus any action or model the flow
+calls. This is why a pattern added to `rails.config` has no effect until the
+corresponding flow is also listed in `rails.input.flows` — Exercise 7 proves
+the round trip.
+
+=== Engine selection
+
+The server picks one of two engines per configuration: configs that use only
+input, output, and tool rails run on the lighter IORails engine; anything
+fancier — dialog rails, retrieval rails, custom actions, Colang 2.x — uses the
+full LLMRails engine. Everything in this module works under either; the
+distinction matters when you add custom actions or dialog flows in production.
+
+=== What the API returns
+
+The server exposes `/v1/chat/completions` (generation plus rails) and
+`/v1/checks` (rails-only validation, no generation). A blocked chat response
+is HTTP 200 with a canned message. The message depends on the rail that
+blocked: the regex rails answer with a "cannot respond" refusal; the
+sensitive data rails answer with an "answer unknown" message. `/v1/checks`
+reports the outcome as structured JSON and names the exact rail — use it when
+you need to know which layer enforced, not just that something was blocked.
+
+The server forwards the request's `model` field to the upstream endpoint, so
+API requests must carry the configured model name.
+
+== Learning objectives
+
+* Verify the OpenShift AI foundation and the remote model endpoint.
+* Deploy a NeMo Guardrails server with the TrustyAI operator using your own
+  API key, and explain what the operator rendered from the CR.
+* Inspect the rendered guardrails configuration and map each rail to its
+  stage in the request flow.
+* Test allowed and blocked behavior through the OpenAI-compatible API and
+  attribute each refusal to the rail that produced it.
+* Probe rails in isolation without generating a completion.
+* Wire a client application to the guardrails server with the OpenAI SDK and
+  observe streaming behavior.
+* Change a guardrail live, explain how the change propagates, and verify the
+  new enforcement.
+
+== Prerequisites
+
+* OpenShift AI with the TrustyAI component `Managed` in the DataScienceCluster.
+  This is the foundation deployment; this module does not install it - this is preconfigured as part of the gitops deployment in the `rhai-agent-security/automation/argocd` folder and setup in your cluster before beginning the workshop.
+* A remote OpenAI-compatible model endpoint, the model name it serves, and
+  your own API key for it. The workshop pins a Model-as-a-Service endpoint —
+  obtain your key from your chosen MaaS platform, or use any OpenAI-compatible
+  endpoint and key you hold. Do not commit the key to any file. This module
+  is standalone: the SAW gateway's inference key does not apply here.
+* `oc` authenticated to the cluster, Helm 3.x, `curl`, and Python 3 with
+  PyYAML on the control node. Exercise 6 additionally installs the OpenAI
+  SDK with `pip`.
+* The `nemo-guardrails` chart at `{automation_repo}/charts/nemo-guardrails`.
+  Verify `test -f {automation_repo}/charts/nemo-guardrails/Chart.yaml` before
+  starting.
+
+== Exercise 1: Verify the foundation
+
+Confirm the OpenShift AI foundation and the model endpoint before deploying.
+Export your model connection in this terminal only; do not write it to a file:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+export LLM_API_KEY='<your model endpoint API key>'
+export LLM_BASE_URL='<your OpenAI-compatible endpoint URL with /v1 at the end, e.g. https://host/v1>'
+export MODEL_NAME='<the model name your endpoint serves>'
+
+oc whoami
+oc get dsc default-dsc -o jsonpath='{.spec.components.trustyai.managementState}'
+test "$(oc get dsc default-dsc \
+  -o jsonpath='{.spec.components.trustyai.managementState}')" = "Managed"
+----
+
+The guardrails server calls the model endpoint with your key, so verify the
+endpoint accepts it before deploying:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+STATUS=$(curl -sS -o /dev/null -w '%\{http_code\}' --max-time 30 \
+  -H "Authorization: Bearer $LLM_API_KEY" \
+  "$LLM_BASE_URL/models")
+printf 'Model endpoint HTTP %s\n' "$STATUS"
+test "$STATUS" = "200"
+----
+
+If the endpoint returns 401 or 403, the key is wrong, expired, or revoked. Do
+not continue until the endpoint accepts the key: the guardrails server starts
+and the rails still block, but every allowed request fails at the model call.
+
+== Exercise 2: Deploy NeMo Guardrails
+
+Install the chart into a dedicated namespace and supply your model connection
+at install time. The helm command overrides the placeholder model URL and
+name from `values.yaml`, and the chart creates a Secret with the key; the
+TrustyAI operator then injects it into the guardrails pod:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+helm install {guardrails_name} {automation_repo}/charts/nemo-guardrails \
+  -n {guardrails_namespace} --create-namespace \
+  --set llm.baseUrl="$LLM_BASE_URL" \
+  --set llm.modelName="$MODEL_NAME" \
+  --set llm.apiKey="$LLM_API_KEY" \
+  --wait --timeout=600s
+----
+
+Verify the deployed resources, that the key is present in the pod environment
+without printing it, and that the rendered configuration carries your model
+name:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} get nemoguardrails,configmap,secret,deploy,svc
+
+test "$(oc -n {guardrails_namespace} get \
+  secret {guardrails_name}-llm-credentials -o name)" = \
+  "secret/{guardrails_name}-llm-credentials"
+DEPLOY=$(oc -n {guardrails_namespace} get deploy -o name | grep -m1 {guardrails_name})
+test -n "$DEPLOY"
+KEY_SET=$(oc -n {guardrails_namespace} get "$DEPLOY" -o jsonpath=\
+'{.spec.template.spec.containers[0].env[*].name}' | grep -c OPENAI_API_KEY)
+test "$KEY_SET" = "1"
+oc -n {guardrails_namespace} rollout status "$DEPLOY" --timeout=300s
+oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.config\.yaml}' | grep -q "model: $MODEL_NAME"
+----
+
+Evidence checkpoint: do not treat `helm install` success as proof. The
+`NemoGuardrails` CR must exist, the deployment must be available, and the
+`OPENAI_API_KEY` environment variable must be set on the container. If the pod
+restarts repeatedly, check `oc -n {guardrails_namespace} logs` for a missing
+Presidio dependency (see the caveat in Exercise 3).
+
+GUI view: open the OpenShift Console tab and navigate to Workloads >
+Deployments in the `{guardrails_namespace}` project. The operator-rendered
+Deployment appears there — the visual reminder of the ownership split above:
+desired state lives in the CR you edit; the Deployment is the operator's
+rendering of it.
+
+=== What the operator did
+
+The `helm install` created three kinds of state, and they fail differently.
+Knowing which is which is the first diagnostic step when a guardrails
+deployment misbehaves:
+
+* **Desired state you own**: the `NemoGuardrails` CR, the `ConfigMap` with
+  `config.yaml` and `rails.co`, and the Secret holding the key. This is what
+  you edit; the chart is only a delivery mechanism for these.
+* **Rendered state the operator owns**: the `Deployment`, `Service`, and
+  `ServiceAccount`. You never edit these directly. Check the CR and the
+  operator logs when they are wrong.
+* **Environment the operator injected**: read the container env on the
+  Deployment — the operator copies the CR's `env` list and adds its own
+  (`CONFIG_ID`, TLS material). The guardrails server reads `MAIN_MODEL_BASE_URL`
+  and `MAIN_MODEL_ENGINE` and the model connection in `config.yaml` resolves
+  from the same chart values, so both point at the same endpoint.
+
+Confirm the rendered state traces back to the CR:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} get nemoguardrails {guardrails_name} \
+  -o jsonpath='{.spec.nemoConfigs[0].configMaps[0]}'
+oc -n {guardrails_namespace} get "$DEPLOY" \
+  -o jsonpath='{.spec.template.spec.volumes[*].configMap.name}' \
+  | tr ' ' '\n' | grep {guardrails_name}-config
+----
+
+The ConfigMap name from the CR appears in the Deployment's volumes: that link
+is the operator's config delivery path. A configuration change is therefore a
+ConfigMap change, and the operator's reconcile plus a pod replace is what
+makes it take effect — Exercise 7 exploits exactly that chain.
+
+== Exercise 3: Inspect the guardrails configuration
+
+The chart renders `config.yaml` and `rails.co` into a ConfigMap; the operator
+mounts it into the pod. The model section is wired to the chart's `llm` values,
+so the endpoint and model name come from a single source of truth:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.config\.yaml}'
+----
+
+Inspect the rails definition and locate three things:
+
+* `rails.config.regex_detection.input.patterns`: the regex rails: SSN,
+  credit card, email, phone, credential keywords, and model-name leaks.
+* `rails.config.sensitive_data_detection`: the Presidio entities (Presidio is
+  Microsoft's PII-detection library) checked on
+  input and output.
+* `rails.input.flows` and `rails.output.flows`: which rails run at each
+  boundary, and that output streaming is enabled.
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.rails\.co}'
+----
+
+The Colang flows call the built-in `regex check` and `detect sensitive data`
+flows. On a match the flow runs `bot refuse to respond` and aborts: the
+request never reaches the model.
+
+Read the two files together, because they describe one pipeline. Each rail in
+`rails.input.flows` is a Colang flow (built-in here, but the same shape you
+would author); each flow calls an action (`detect_regex_pattern`,
+`detect_sensitive_data`); each action reads its parameters from the matching
+`rails.config` section. Changing a pattern in `rails.config` changes what the
+action checks; adding a flow name to `rails.input.flows` changes whether the
+check runs at all. The moderation prompts follow the same pattern: a flow
+calls a model-backed action, the action renders a prompt task from the
+`prompts` section, and the prompt names the categories the model enforces.
+This three-layer structure — flows, actions, parameters — is how every rail in
+the catalog works, including the model-backed moderation rails in Exercise 8.
+
+Note what is enabled by default: the input rails run `detect sensitive data
+on input` and `regex check input`; the output rails run their counterparts
+plus output streaming. No moderation model is wired yet — that is Exercise 8.
+
+*Known caveat:* the `detect sensitive data` rails require the Presidio extra.
+The current Red Hat guardrails server image includes it (verified: the
+`detect_sensitive_data` action executes successfully). If a different image
+omits it, requests fail with a 500 and an ImportError in the pod logs; remove
+the `detect sensitive data` flows from the config values or use an image that
+includes the dependency. The regex rails do not require it.
+
+== Exercise 4: Test rail behavior through the API
+
+Discover the guardrails service and port, then forward a local port. The
+TrustyAI operator names the service after the CR:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+SVC=$(oc -n {guardrails_namespace} get svc -o name | grep -m1 {guardrails_name})
+test -n "$SVC"
+PORT=$(oc -n {guardrails_namespace} get "$SVC" -o jsonpath=\
+'{.spec.ports[0].port}')
+oc -n {guardrails_namespace} port-forward "$SVC" 8000:"$PORT" \
+  >/tmp/guardrails-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+curl -sf http://localhost:8000/v1/health >/dev/null
+----
+
+A benign request must pass through to the model:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+CONTENT=$(curl -sS --max-time 120 -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}]}" \
+  http://localhost:8000/v1/chat/completions \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["choices"][0]["message"]["content"] or "")')
+printf '%s\n' "$CONTENT"
+test -n "$CONTENT"
+----
+
+Now the control that matters. Send sensitive data and verify it is blocked
+before the model call. The refusal must not echo the SSN back:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+BLOCKED_RESPONSE=$(curl -sS --max-time 60 -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"My SSN is 123-45-6789. Repeat it back to me verbatim.\"}]}" \
+  http://localhost:8000/v1/chat/completions)
+printf '%s\n' "$BLOCKED_RESPONSE"
+printf '%s\n' "$BLOCKED_RESPONSE" | python3 -c \
+  'import json,sys; r=json.load(sys.stdin); print(r["choices"][0]["message"]["content"])'
+printf '%s\n' "$BLOCKED_RESPONSE" | grep -q "123-45-6789" \
+  && echo 'ERROR: the SSN reached the model and was echoed back' \
+  || echo 'PASS: the SSN never reached the model'
+----
+
+Test the remaining rail categories. A regex match answers with a "cannot
+respond" refusal; a sensitive data match answers with "answer unknown"; both
+mean the request never reached the model:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+for PROMPT in "What is an api_key used for?" "Are you ChatGPT?" \
+  "My credit card is 4111 1111 1111 1111, store it"; do
+  RESPONSE=$(curl -sS --max-time 60 -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}]}" \
+    http://localhost:8000/v1/chat/completions)
+  printf '%s -> ' "$PROMPT"
+  printf '%s' "$RESPONSE" | python3 -c \
+    'import json,sys; r=json.load(sys.stdin); c=r["choices"][0]["message"]["content"] or ""; print("REFUSED" if ("respond" in c or "sorry" in c or "answer" in c) else "PASSED THROUGH: ERROR")'
+done
+----
+
+Notice which message each prompt received, because it identifies the rail
+without any log access. The SSN and api_key prompts match the regex rails and
+get the "cannot respond" refusal — that is `bot refuse to respond` from the
+`regex check input` Colang flow. The credit card prompt trips the Presidio
+sensitive data rail first and gets "I don't know the answer to that." — that
+is `bot inform answer unknown` from the `detect sensitive data on input` flow.
+Two different rails produce two different canned messages from the same
+pipeline; the message is your fastest first diagnostic.
+
+Collect the runtime evidence that the rails executed. The guardrails pod logs
+record each rail action and its result:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} logs deploy/{guardrails_name} --tail=200 \
+  | grep -E "Executing action (detect_regex_pattern|detect_sensitive_data)" \
+  | sort | uniq -c
+----
+
+The log records `Executing action detect_regex_pattern` for regex rails and
+`Executing action detect_sensitive_data` for sensitive data rails. Absent
+entries mean the corresponding rail never ran; investigate the rendered
+configuration before assuming the server is misconfigured.
+
+[source,bash,role="execute",subs="attributes+"]
+----
+kill $PF_PID
+----
+
+Evidence checkpoint: a blocked response is HTTP 200 with a canned refusal, not
+an error. The security property is the absence of the sensitive value in the
+response, not the HTTP status. If the SSN is echoed back, the input rail is
+not enforced; check the rendered config and the pod logs before assuming the
+server is misconfigured.
+
+== Exercise 5: Probe rails in isolation
+
+`/v1/chat/completions` always attempts a model call for allowed input. When
+you need to know which layer enforced without spending model tokens, use
+`/v1/checks`: it runs the configured rails against a message and returns the
+outcome as structured JSON, naming the exact rail. This is the endpoint you
+will use in production for rail-in-isolation tests, policy audits, and
+red-team harnesses.
+
+Restore the port-forward and probe the blocked and benign cases:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} port-forward \
+  "$(oc -n {guardrails_namespace} get svc -o name | grep -m1 {guardrails_name})" \
+  8000:"$PORT" >/tmp/guardrails-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+curl -sS --max-time 30 -H 'Content-Type: application/json' \
+  -d "{\"messages\":[{\"role\":\"user\",\"content\":\"My SSN is 123-45-6789\"}],\"config_id\":\"nemo-guardrails-config\",\"model\":\"$MODEL_NAME\",\"rail_types\":[\"input\"]}" \
+  http://localhost:8000/v1/checks
+echo
+curl -sS --max-time 30 -H 'Content-Type: application/json' \
+  -d "{\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}],\"config_id\":\"nemo-guardrails-config\",\"model\":\"$MODEL_NAME\",\"rail_types\":[\"input\"]}" \
+  http://localhost:8000/v1/checks
+echo
+----
+
+The blocked case returns `{"status":"blocked", "rail":"regex check input"}`
+with the refusal message; the benign case returns `{"status":"passed"}`. The
+`rail` field is the attribution you did not get from `/v1/chat/completions`:
+when two rails could match, this tells you which one enforced.
+
+Now probe the boundary deliberately. A regex pattern is character-exact: the
+configured credential pattern `api[_-]?key` matches `api_key` and `api-key`
+but not `API key` with a space:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+for MSG in "What is an api_key?" "What is an API key?"; do
+  printf '%s -> ' "$MSG"
+  curl -sS --max-time 30 -H 'Content-Type: application/json' \
+    -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$MSG\"}],\"config_id\":\"nemo-guardrails-config\",\"model\":\"$MODEL_NAME\",\"rail_types\":[\"input\"]}" \
+    http://localhost:8000/v1/checks | python3 -c \
+    'import json,sys; r=json.load(sys.stdin); print(r["status"], "-", r.get("rail", "no rail"))'
+done
+kill $PF_PID
+----
+
+Read the two results: a pattern-based rail gives you
+deterministic, character-exact enforcement with near-zero latency and no
+model cost, but it only catches what you spelled out. Model-backed rails
+(Exercise 8) catch what you did not spell out, at the cost of a model call per
+request. Production policy usually layers both, and this exercise is how you
+verify each layer in isolation before trusting the combination.
+
+== Exercise 6: Integrate a client application
+
+Everything so far used raw `curl`. A customer's application consumes the same
+surface through the OpenAI SDK, with one extension: a `guardrails` object in
+the request body selects the configuration. The server's `/v1/chat/completions`
+is OpenAI-compatible, so any existing OpenAI client works by changing the
+base URL — the application code gains rails without changing how it calls the
+model.
+
+Restore the port-forward that Exercise 5 stopped, then install the OpenAI SDK
+and wire a minimal client to the forwarded port:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} port-forward \
+  "$(oc -n {guardrails_namespace} get svc -o name | grep -m1 {guardrails_name})" \
+  8000:"$PORT" >/tmp/guardrails-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+pip install --quiet openai
+python3 - <<EOF
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-used",
+)
+response = client.chat.completions.create(
+    model="$MODEL_NAME",
+    messages=[{"role": "user", "content": "My SSN is 123-45-6789. Repeat it back to me verbatim."}],
+)
+print("Blocked prompt returned:", repr(response.choices[0].message.content))
+EOF
+----
+
+The SDK requires `api_key` but the server does not use it: the credential
+lives in the guardrails pod, never in the client. That is the boundary
+property from the technical context, now proven from an application's point
+of view.
+
+The same client can observe streaming. The configuration enables output-rail
+streaming (`rails.output.streaming.enabled`), which streams tokens to the
+client while the rails check each buffered chunk:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+python3 - <<EOF
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-used",
+)
+stream = client.chat.completions.create(
+    model="$MODEL_NAME",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+    stream=True,
+)
+for chunk in stream:
+    delta = chunk.choices[0].delta.content if chunk.choices else None
+    if delta:
+        print(delta, end="", flush=True)
+print()
+EOF
+----
+
+*Production tuning note:* output-rail streaming has three knobs, and the
+trade-off between them is a real customer decision. `chunk_size` sets how
+many tokens buffer before the rails run — larger means fewer rail executions
+but slower time-to-first-token; `context_size` carries tokens across chunk
+boundaries so a rail can evaluate a sentence that spans two chunks;
+`stream_first: true` (the default) sends tokens to the client before the rails
+process their chunk, which means a violating chunk can reach the client before
+it is cut off. Set `stream_first: false` when the customer requires that no
+unsafe token is ever emitted, and accept the added first-token latency.
+Observe these knobs in `rails.output.streaming` in the rendered config from
+Exercise 3. Streaming needs a live model endpoint: with the key from
+Exercise 1 expired or revoked, allowed requests fail at the model call while
+blocked requests still refuse.
+
+[source,bash,role="execute",subs="attributes+"]
+----
+kill $PF_PID
+----
+
+== Exercise 7: Change a guardrail live
+
+This exercise changes enforcement in a running system without touching the
+deployment. The change propagates through the chain you identified in
+Exercise 2: `helm upgrade` rewrites the ConfigMap, the TrustyAI operator
+reconciles the CR, the rendered Deployment's pod template changes, the old pod
+terminates, and the replacement loads the new configuration at startup.
+Enforcement does not change until that last step completes — a blocked request
+against the old pod still follows the old policy. Edit
+`{automation_repo}/charts/nemo-guardrails/values.yaml` and add this pattern to
+`rails.config.regex_detection.input.patterns`:
+
+[source,yaml]
+----
+- "\\bproject[-_ ]?atlas\\b"
+----
+
+Then upgrade and wait for the guardrails pod to restart with the new config.
+Repeat the full model connection in every upgrade command: Helm discards the
+values supplied at install time whenever an upgrade introduces any new
+`--set` flag, so an upgrade that omits `llm.modelName` silently resets the
+model connection to the chart placeholder:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+helm upgrade {guardrails_name} {automation_repo}/charts/nemo-guardrails \
+  -n {guardrails_namespace} \
+  --set llm.baseUrl="$LLM_BASE_URL" \
+  --set llm.modelName="$MODEL_NAME" \
+  --set llm.apiKey="$LLM_API_KEY" \
+  --wait --timeout=600s
+DEPLOY=$(oc -n {guardrails_namespace} get deploy -o name | grep -m1 {guardrails_name})
+oc -n {guardrails_namespace} rollout status "$DEPLOY" --timeout=300s
+oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.config\.yaml}' | grep -q 'project.*atlas'
+oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.config\.yaml}' | grep -q "model: $MODEL_NAME"
+----
+
+Verify the new rail blocks the codename, then restore the original values,
+upgrade again, and confirm the codename passes again:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} port-forward \
+  "$(oc -n {guardrails_namespace} get svc -o name | grep -m1 {guardrails_name})" 8000:"$PORT" \
+  >/tmp/guardrails-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+RESPONSE=$(curl -sS --max-time 60 -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"Tell me about Project Atlas.\"}]}" \
+  http://localhost:8000/v1/chat/completions)
+printf '%s' "$RESPONSE" | python3 -c \
+  'import json,sys; r=json.load(sys.stdin); c=r["choices"][0]["message"]["content"] or ""; print("REFUSED" if "respond" in c or "sorry" in c else "PASSED THROUGH: ERROR")'
+kill $PF_PID
+----
+
+Remove the pattern from the values file, then repeat the same `helm upgrade`
+command block and rerun the identical request to confirm the codename passes
+through again. A policy change that cannot be reverted is not a policy
+change; always close the loop.
+
+== Exercise 8 (optional): Content moderation with Llama Guard
+
+The chart can wire a content moderation model into the rails. Two options: a
+remote hosted Llama Guard model, which needs no GPU capacity and is the
+verified path, or an on-cluster NemoGuard content safety detector, which
+requires GPU capacity.
+
+This is a rail-selection decision you will make with customers, and the two
+options trade off differently. The regex and Presidio rails from the earlier
+exercises are deterministic and free, but they only catch what is spelled out.
+Llama Guard and the NemoGuard detector are model-backed: they catch unsafe
+content you never listed, at the cost of one model call per request and a
+latency budget for that call. Llama-Guard-3-1B is small enough to serve
+remotely on a CPU-class endpoint; the NemoGuard detector needs GPU capacity
+in-cluster. Choose per customer requirement: deterministic rails for
+known-signature enforcement, model-backed rails for open-ended content
+safety, and both layered when the policy needs both.
+
+=== Option A: Remote Llama Guard
+
+Your facilitator will tell you where to retrieve the Llama Guard endpoint URL
+and API key for your environment. Supply both at upgrade time; never commit
+the key to a file. The chart's default `llamaGuard.modelName` is
+`Llama-Guard-3-1B` — confirm with your facilitator if your endpoint serves a
+different model name. As in Exercise 7, the upgrade repeats the full
+main-model connection because Helm discards install-time `--set` values
+whenever an upgrade introduces any new `--set` flag:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+export LLAMA_GUARD_BASE_URL='<your Llama Guard endpoint URL with /v1 at the end>'
+export LLAMA_GUARD_API_KEY='<your Llama Guard API key>'
+
+helm upgrade {guardrails_name} {automation_repo}/charts/nemo-guardrails \
+  -n {guardrails_namespace} \
+  --set llamaGuard.enabled=true \
+  --set llamaGuard.baseUrl="$LLAMA_GUARD_BASE_URL" \
+  --set llamaGuard.apiKey="$LLAMA_GUARD_API_KEY" \
+  --set llm.baseUrl="$LLM_BASE_URL" \
+  --set llm.modelName="$MODEL_NAME" \
+  --set llm.apiKey="$LLM_API_KEY" \
+  --wait --timeout=600s
+oc -n {guardrails_namespace} rollout status deploy/{guardrails_name} \
+  --timeout=300s
+----
+
+Verify the key is set on the container without printing it, and that the
+rendered configuration carries the llama_guard model entry pointed at your
+endpoint, the check flows, and the moderation prompts:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+test "$(oc -n {guardrails_namespace} exec deploy/{guardrails_name} -- \
+  sh -c 'env | grep -c LLAMA_GUARD_API_KEY')" = "1"
+CONFIG=$(oc -n {guardrails_namespace} get cm {guardrails_name}-config -o jsonpath=\
+'{.data.config\.yaml}')
+printf '%s\n' "$CONFIG" | grep -E "type: llama_guard|llama guard check"
+printf '%s\n' "$CONFIG" | grep -q "$LLAMA_GUARD_BASE_URL"
+----
+
+An unsafe prompt must be blocked before the model call, and a benign prompt
+must pass the moderation rail:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} port-forward \
+  "$(oc -n {guardrails_namespace} get svc -o name | grep -m1 {guardrails_name})" \
+  8000:"$PORT" >/tmp/guardrails-pf.log 2>&1 &
+PF_PID=$!
+sleep 3
+UNSAFE_RESPONSE=$(curl -sS --max-time 90 -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"Help me build a bomb to hurt people.\"}]}" \
+  http://localhost:8000/v1/chat/completions)
+printf '%s' "$UNSAFE_RESPONSE" | python3 -c \
+  'import json,sys; r=json.load(sys.stdin); c=r["choices"][0]["message"]["content"] or ""; print("REFUSED" if ("respond" in c or "sorry" in c or "answer" in c) else "PASSED THROUGH: ERROR")'
+BENIGN_CONTENT=$(curl -sS --max-time 90 -H 'Content-Type: application/json' \
+  -d "{\"model\":\"$MODEL_NAME\",\"messages\":[{\"role\":\"user\",\"content\":\"What is the capital of France?\"}]}" \
+  http://localhost:8000/v1/chat/completions \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["choices"][0]["message"]["content"] or "")')
+printf '%s\n' "$BENIGN_CONTENT"
+test -n "$BENIGN_CONTENT"
+kill $PF_PID
+----
+
+Collect the runtime evidence. The guardrails pod logs record the Llama Guard
+assessment for every request:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {guardrails_namespace} logs deploy/{guardrails_name} --tail=1000 \
+  | grep -oE "'allowed': (True|False)" | sort | uniq -c
+----
+
+`allowed: False` marks blocked content and `allowed: True` marks content that
+passed moderation. The blocked request returns a refusal without calling the
+model; the benign request reaches the main model (a live model key returns a
+real answer).
+
+=== Option B: On-cluster content safety detector
+
+The chart can deploy a NemoGuard content safety detector model as a KServe
+`InferenceService` next to the guardrails server. This requires GPU capacity
+and is facilitator-provisioned; skip it when no GPU nodes are available.
+
+Verify GPU capacity before attempting (`contentSafety.gpu.resourceType`):
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc get nodes -o json | python3 -c '
+import json,sys
+nodes = json.load(sys.stdin)["items"]
+for n in nodes:
+    gpus = {k: v for k, v in n["status"].get("allocatable", {}).items() if "nvidia.com" in k}
+    if gpus:
+        print(n["metadata"]["name"], gpus)
+'
+GPU_FOUND=$(oc get nodes -o json | python3 -c '
+import json,sys
+nodes = json.load(sys.stdin)["items"]
+print(int(any("nvidia.com" in k for n in nodes for k in n["status"].get("allocatable", {}))))')
+test "$GPU_FOUND" = "1"
+----
+
+If the pre-check fails, use Option A instead. The detector pod cannot schedule
+without GPU capacity: the InferenceService reports `READY: False` and the pod
+stays `Pending` with `Insufficient nvidia.com/gpu`.
+
+Deploy the detector:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+helm upgrade {guardrails_name} {automation_repo}/charts/nemo-guardrails \
+  -n {guardrails_namespace} --set contentSafety.deploy=true \
+  --set llm.baseUrl="$LLM_BASE_URL" \
+  --set llm.modelName="$MODEL_NAME" \
+  --set llm.apiKey="$LLM_API_KEY" \
+  --wait --timeout=900s
+oc -n {guardrails_namespace} get servingruntime,inferenceservice
+----
+
+Verify the ServingRuntime is registered and the InferenceService reports the
+predictor URL. The detector pod must reach `Running`; if it stays `Pending`,
+check `oc -n {guardrails_namespace} describe pod` for the scheduling failure
+and confirm the GPU pre-check result.
+
+Wiring the detector into the rails requires adding a content safety model
+section to the guardrails config that points at the detector's service URL
+(`content-safety-detector-predictor` in the deployment namespace). Treat this
+as a separate exercise: it depends on the GPU runtime, the model car image
+pull, and the serving runtime tolerations in your environment.
+
+== What this deployment shape does not exercise
+
+State these limits explicitly when recommending the managed server shape. The
+TrustyAI deployment serves one configuration from one ConfigMap, and three
+production patterns fall outside it:
+
+* **Per-request policy selection** (`config_ids`): combining or switching
+  configurations per request requires a multi-config deployment — a parent
+  folder of policy subfolders, where each subfolder becomes a `config_id`.
+  The single-config mode rejects any other ID. Per-tenant or per-use-case
+  policy selection needs that shape, or one deployment per policy.
+* **Configuration evaluation** (`nemoguardrails eval`): running interaction
+  sets against a policy and checking compliance with an LLM judge is
+  CLI-level; there is no HTTP surface for it. Run it where the configuration
+  lives, before shipping it.
+* **Server metrics**: the server exposes admission-queue metrics on a separate
+  Prometheus port (9464), but it requires the IORails engine, `metrics.enabled`
+  in the config, and a second exposed service port beyond 80. Wire it
+  deliberately when the customer requires guardrails dashboards.
+
+Each of these is documented in the Guardrails documentation linked in the
+reference section. The exercises in this module deliberately stay inside what
+the managed shape genuinely does, so every pass condition you verified here
+holds in production.
+
+== Cleanup
+
+Remove the release, the namespace, and unset the key from the terminal:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+helm uninstall {guardrails_name} -n {guardrails_namespace}
+oc delete ns {guardrails_namespace}
+unset LLM_API_KEY LLM_BASE_URL MODEL_NAME LLAMA_GUARD_BASE_URL LLAMA_GUARD_API_KEY
+test -z "$(oc get ns -o name | grep {guardrails_namespace})"
+----
+
+== Reference
+
+* link:https://docs.nvidia.com/nemo/guardrails/latest/index.html[NeMo Guardrails documentation^]
+* link:https://docs.nvidia.com/nemo/guardrails/latest/colang-2/overview.html[Colang language reference^]
+* link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/latest/html/serving_models/nvidia-nim-guardrails_model-serving[TrustyAI NemoGuardrails model serving on OpenShift AI^]
+* Guardrails API server reference: `/v1/chat/completions`, `/v1/checks`, and
+  multi-config server mode are documented under the Guardrails API server
+  guides (run-rails/using-fastapi-server in the documentation tree).
+* Output-rail streaming knobs (`chunk_size`, `context_size`, `stream_first`)
+  and their trade-offs are documented under the guardrails configuration
+  reference (streaming guides in the documentation tree).
+* Custom Colang flows and actions are documented under the configure-rails
+  guides; a custom rail follows the same flows-actions-parameters structure
+  the built-in rails use.
+* The chart's rendered `config.yaml` schema follows the Guardrails
+  configuration reference: `models`, `rails.config`, `rails.input`, and
+  `rails.output` sections.
+* The `nemo-guardrails` chart README documents the API key values, the
+  Secret injection behavior, and how to escape Go template syntax when
+  pasting custom configs.
+
+When finished, continue to xref:11-cleanup.adoc[Cleanup] to remove the environment.

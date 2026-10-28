@@ -1,0 +1,541 @@
+NS             ?= openshell-agents
+BUILD_NS       ?= openshell-agents
+QUAY_REPO      ?= quay.io/rh-ai-quickstart
+OPENSHELL_VERSION ?= 0.0.103
+OPENSHELL_SAW_NAME ?=
+SANDBOX_IMAGE  ?=
+AGENT          ?= openclaw
+CONTAINER_RUNTIME ?= docker
+IMAGE_NAME      = $(if $(filter docker,$(CONTAINER_RUNTIME)),openshell-gateway-docker,openshell-gateway)
+GOVERNANCE_ENABLED ?= true
+PROVIDER       ?=
+MODEL          ?=
+API_KEY        ?=
+ENDPOINT_URL   ?=
+WEB_SEARCH     ?=
+GCP_SA_JSON    ?=
+OIDC_ISSUER    ?=
+OIDC_CLIENT_ID ?= openshell-cli
+OIDC_FLOW      ?= browser
+OIDC_TOKEN_DIR ?= $(HOME)/.config/openshell/oidc
+SSH_KEY_PATH   ?= $(HOME)/.generated-ssh-keys/sandbox-ssh
+OWNER          ?=
+NAMESPACE_MODE ?= shared
+HELM_DIR       := image-builder-charts/helm/
+SAW_CHART  := charts/openshell-saw
+KEYCLOAK_CHART := charts/openshell-keycloak
+KEYCLOAK_NS    ?= $(NS)
+SCRIPTS_DIR    := scripts
+GUI_PORT       ?= 18789
+WORKSPACE      ?= default
+
+SSH_PUBKEY = $(shell cat "$(SSH_KEY_PATH).pub" 2>/dev/null)
+
+.check-saw-name:
+	@if [ -z "$(OPENSHELL_SAW_NAME)" ]; then \
+		echo "Error: OPENSHELL_SAW_NAME is required."; \
+		echo "  Set it via: export OPENSHELL_SAW_NAME=my-saw"; \
+		echo "  Or pass it: make <target> OPENSHELL_SAW_NAME=my-saw"; \
+		exit 1; \
+	fi
+
+.check-ssh-key:
+	@test -f "$(SSH_KEY_PATH).pub" || { \
+		echo "Error: SSH key not found at $(SSH_KEY_PATH).pub"; \
+		echo "Generate one with: make generate-keys"; \
+		echo "Or set SSH_KEY_PATH to your own key: make openshell-saw-create SSH_KEY_PATH=~/.ssh/my_key"; \
+		exit 1; \
+	}
+
+.check-gateway-ca:
+	@test -f "$(HOME)/.config/openshell/gateways/$(OPENSHELL_SAW_NAME)/mtls/ca.crt" || { \
+		echo "Error: Gateway CA certificate not found for '$(OPENSHELL_SAW_NAME)'."; \
+		echo "Run 'make openshell-saw-configure-gateway OPENSHELL_SAW_NAME=$(OPENSHELL_SAW_NAME)' first."; \
+		exit 1; \
+	}
+
+.check-prereqs:
+	@echo "Checking prerequisites..."
+	@command -v oc >/dev/null 2>&1 || { echo "Error: 'oc' CLI not found."; exit 1; }
+	@command -v helm >/dev/null 2>&1 || { echo "Error: 'helm' CLI not found."; exit 1; }
+	@command -v virtctl >/dev/null 2>&1 || echo "Warning: 'virtctl' not found. Install it for SSH access to sandbox VMs."
+	@command -v openshell >/dev/null 2>&1 || echo "Warning: 'openshell' CLI not found. Install from https://github.com/NVIDIA/OpenShell/releases"
+	@oc whoami >/dev/null 2>&1 || { echo "Error: Not logged in to OpenShift."; exit 1; }
+	@echo "  oc:        $$(oc version --client -o json 2>/dev/null | jq -r '.releaseClientVersion // .clientVersion.gitVersion // "ok"')"
+	@echo "  helm:      $$(helm version --short 2>/dev/null)"
+	@command -v virtctl >/dev/null 2>&1 && echo "  virtctl:   $$(virtctl version --client 2>/dev/null | head -1)" || true
+	@command -v openshell >/dev/null 2>&1 && echo "  openshell: $$(openshell --version 2>/dev/null)" || true
+	@command -v openssl >/dev/null 2>&1 && echo "  openssl:   $$(openssl version 2>/dev/null)" || \
+		{ echo "Error: openssl is required (used by 'make login' for PKCE challenge generation)."; exit 1; }
+	@echo "Checking operators..."
+	@oc get csv -n openshift-cnv 2>/dev/null | grep -q kubevirt || { echo "Error: OpenShift Virtualization not installed."; exit 1; }
+	@echo "  OpenShift Virtualization: installed"
+	@if oc get csv -n $(NS) 2>/dev/null | grep -q rhbk; then \
+		echo "  RHBK (Keycloak): installed in $(NS)"; \
+	elif oc get csv --all-namespaces 2>/dev/null | grep -q rhbk; then \
+		RHBK_NS=$$(oc get csv --all-namespaces 2>/dev/null | grep rhbk | awk '{print $$1}' | head -1); \
+		echo "Error: RHBK operator found in namespace '$${RHBK_NS}' but not in '$(NS)'."; \
+		echo "  Install it in '$(NS)' by running:"; \
+		echo "    oc create namespace $(NS) --dry-run=client -o yaml | oc apply -f -"; \
+		echo "    oc apply -f - <<EOF"; \
+		echo "apiVersion: operators.coreos.com/v1"; \
+		echo "kind: OperatorGroup"; \
+		echo "metadata:"; \
+		echo "  name: $(NS)-og"; \
+		echo "  namespace: $(NS)"; \
+		echo "spec:"; \
+		echo "  targetNamespaces:"; \
+		echo "    - $(NS)"; \
+		echo "---"; \
+		echo "apiVersion: operators.coreos.com/v1alpha1"; \
+		echo "kind: Subscription"; \
+		echo "metadata:"; \
+		echo "  name: rhbk-operator"; \
+		echo "  namespace: $(NS)"; \
+		echo "spec:"; \
+		echo "  channel: stable-v26"; \
+		echo "  name: rhbk-operator"; \
+		echo "  source: redhat-operators"; \
+		echo "  sourceNamespace: openshift-marketplace"; \
+		echo "EOF"; \
+		exit 1; \
+	else \
+		echo "Error: RHBK operator not installed."; exit 1; \
+	fi
+	@if [ -f "$(SSH_KEY_PATH).pub" ]; then echo "  SSH key: $(SSH_KEY_PATH)"; \
+	else echo "  SSH key: not found. Run 'make generate-keys'."; fi
+	@echo "Checking image registry route..."
+	@if ! oc get route default-route -n openshift-image-registry >/dev/null 2>&1; then \
+		echo "  Image registry route: enabling..."; \
+		oc patch configs.imageregistry.operator.openshift.io/cluster --patch '{"spec":{"defaultRoute":true}}' --type=merge >/dev/null 2>&1; \
+	fi; \
+	echo "  Image registry route: enabled"
+	@echo "Prerequisites OK."
+
+.PHONY: check-prereqs generate-keys \
+        build-nemoclaw build-nemoclaw-cli build-openclaw-openshell build-openclaw-openshell-local \
+        build-gateway-docker build-gateway-podman copy-images \
+        keycloak keycloak-issuer login whoami logout delete-keycloak \
+        openshell-saw-create openshell-saw-list openshell-saw-logs openshell-saw-ssh ssh-secret \
+        openshell-saw-configure-gateway openshell-saw-tui openshell-saw-gui test \
+        openshell-saw-delete sandbox-pre-delete delete-all status \
+        governance-list-profiles governance-add-profile governance-remove-profile governance-create-profile governance-demo \
+        .check-saw-name .check-ssh-key .check-gateway-ca .check-prereqs
+
+check-prereqs: .check-prereqs ## Verify required operators and CLI tools
+
+generate-keys: ## Generate SSH keypair for sandbox provisioning
+	@$(SCRIPTS_DIR)/generate-keys.sh
+
+# --- NemoClaw images ---
+
+build-nemoclaw: ## Build NemoClaw sandbox image and push to quay (set OTEL=1 to include diagnostics-otel)
+	-@oc delete is nemoclaw-sandbox -n $(BUILD_NS) 2>/dev/null
+	helm upgrade --install nemoclaw-imagestream $(HELM_DIR)nemoclaw-imagestream \
+		--namespace $(BUILD_NS) --create-namespace \
+		$(if $(filter 1,$(OTEL)),--set build.otelEnabled=1)
+	oc start-build nemoclaw-sandbox -n $(BUILD_NS) --follow
+	@echo "Pushing nemoclaw-sandbox to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-sandbox $(QUAY_REPO) $(OPENSHELL_VERSION)
+
+build-nemoclaw-cli: ## Build NemoClaw CLI image and push to quay
+	-@oc delete is nemoclaw-cli -n $(BUILD_NS) 2>/dev/null
+	helm upgrade --install nemoclaw-cli-imagestream $(HELM_DIR)nemoclaw-cli-imagestream \
+		--namespace $(BUILD_NS) --create-namespace
+	oc start-build nemoclaw-cli -n $(BUILD_NS) --follow
+	@echo "Pushing nemoclaw-cli to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) nemoclaw-cli $(QUAY_REPO) $(OPENSHELL_VERSION)
+
+build-openclaw-openshell: build-openclaw-openshell-local ## Build the openclaw-openshell sandbox image and push to quay
+	@echo "Pushing openclaw-openshell to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openclaw-openshell $(QUAY_REPO) $(OPENSHELL_VERSION)
+
+build-openclaw-openshell-local: ## Build the openclaw-openshell sandbox image into this cluster's internal registry only (no quay push access needed)
+	-@oc delete is openclaw-openshell -n $(BUILD_NS) 2>/dev/null
+	helm upgrade --install openclaw-openshell-image $(HELM_DIR)openclaw-openshell-image \
+		--namespace $(BUILD_NS) --create-namespace
+	oc start-build openclaw-openshell -n $(BUILD_NS) --follow
+	@echo "Built into image-registry.openshift-image-registry.svc.cluster.local:5000/$(BUILD_NS)/openclaw-openshell:latest"
+	@echo "Point a BOM profile's sandbox image at that path and enable internalRegistry.allowAnonymousPull"
+	@echo "(see charts/openshell-saw/values.yaml) if you don't have quay push access."
+
+# --- Governance interceptor image ---
+
+build-governance-interceptor: ## Build governance interceptor image on cluster and push to quay
+	-@oc delete is governance-interceptor -n $(BUILD_NS) 2>/dev/null
+	helm upgrade --install governance-interceptor-image $(HELM_DIR)governance-interceptor-image \
+		--namespace $(BUILD_NS) --create-namespace
+	oc start-build governance-interceptor -n $(BUILD_NS) --follow
+	@echo "Pushing governance-interceptor to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) governance-interceptor $(QUAY_REPO)
+
+# --- Gateway VM image ---
+
+build-gateway-docker: ## Build Docker gateway VM image and push to quay
+	@echo "Building Docker gateway image (openshell-gateway-docker)..."
+	-@oc delete dv openshell-gateway-docker-golden -n $(BUILD_NS) 2>/dev/null
+	-@oc delete datasource openshell-gateway-docker -n $(BUILD_NS) 2>/dev/null
+	-@oc delete pvc openshell-gateway-docker-golden -n $(BUILD_NS) 2>/dev/null
+	-@oc delete builds -l buildconfig=openshell-gateway-docker -n $(BUILD_NS) 2>/dev/null
+	-@oc delete is openshell-gateway-docker -n $(BUILD_NS) 2>/dev/null
+	@GOLDEN_FLAG=""; \
+	if ! oc api-resources --api-group=cdi.kubevirt.io 2>/dev/null | grep datavolumes >/dev/null 2>&1; then \
+		GOLDEN_FLAG="--set goldenImage.enabled=false"; \
+	fi; \
+	helm upgrade --install openshell-gateway-docker-image $(HELM_DIR)openshell-gateway-image \
+		--namespace $(BUILD_NS) --create-namespace $$GOLDEN_FLAG \
+		--set containerRuntime=docker
+	oc start-build openshell-gateway-docker -n $(BUILD_NS) --follow
+	@echo "Pushing openshell-gateway-docker to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway-docker $(QUAY_REPO) $(OPENSHELL_VERSION)
+
+build-gateway-podman: ## Build Podman gateway VM image and push to quay
+	@echo "Building Podman gateway image (openshell-gateway)..."
+	-@oc delete dv openshell-gateway-golden -n $(BUILD_NS) 2>/dev/null
+	-@oc delete datasource openshell-gateway -n $(BUILD_NS) 2>/dev/null
+	-@oc delete pvc openshell-gateway-golden -n $(BUILD_NS) 2>/dev/null
+	-@oc delete builds -l buildconfig=openshell-gateway -n $(BUILD_NS) 2>/dev/null
+	-@oc delete is openshell-gateway -n $(BUILD_NS) 2>/dev/null
+	@GOLDEN_FLAG=""; \
+	if ! oc api-resources --api-group=cdi.kubevirt.io 2>/dev/null | grep datavolumes >/dev/null 2>&1; then \
+		GOLDEN_FLAG="--set goldenImage.enabled=false"; \
+	fi; \
+	helm upgrade --install openshell-gateway-image $(HELM_DIR)openshell-gateway-image \
+		--namespace $(BUILD_NS) --create-namespace $$GOLDEN_FLAG \
+		--set containerRuntime=podman
+	oc start-build openshell-gateway -n $(BUILD_NS) --follow
+	@echo "Pushing openshell-gateway to $(QUAY_REPO)..."
+	@$(SCRIPTS_DIR)/push-image.sh $(BUILD_NS) openshell-gateway $(QUAY_REPO) $(OPENSHELL_VERSION)
+
+
+copy-images: ## Mirror pre-built images from quay to the internal registry
+	@echo "Ensuring namespace and image registry route..."
+	@oc create namespace $(BUILD_NS) --dry-run=client -o yaml | oc apply -f - 2>/dev/null
+	@oc patch configs.imageregistry.operator.openshift.io/cluster \
+		--patch '{"spec":{"defaultRoute":true}}' --type=merge >/dev/null 2>&1 || true
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "macOS detected — using in-cluster skopeo Jobs (avoids podman-machine upload drops)."; \
+		BUILD_NS=$(BUILD_NS) QUAY_REPO=$(QUAY_REPO) OPENSHELL_VERSION=$(OPENSHELL_VERSION) \
+			$(SCRIPTS_DIR)/mirror-images-incluster.sh; \
+	else \
+		for i in $$(seq 1 30); do \
+			REGISTRY=$$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null); \
+			if [ -n "$$REGISTRY" ]; then break; fi; \
+			sleep 5; \
+		done; \
+		echo "Authenticating to internal registry..."; \
+		REGISTRY=$$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null); \
+		TOKEN=$$(oc whoami -t); \
+		podman login --tls-verify=false -u unused -p $${TOKEN} $${REGISTRY} >/dev/null 2>&1 || \
+		docker login $${REGISTRY} -u unused -p $${TOKEN} >/dev/null 2>&1 || echo "WARN: Container runtime login failed — oc image mirror will use oc credentials"; \
+		echo "Mirroring images from $(QUAY_REPO) to internal registry..."; \
+		REGISTRY=$$(oc get route default-route -n openshift-image-registry -o jsonpath='{.spec.host}' 2>/dev/null); \
+		if [ -z "$$REGISTRY" ]; then echo "Error: Image registry route not available after waiting."; exit 1; fi; \
+		for image in openshell-gateway openshell-gateway-docker nemoclaw-sandbox nemoclaw-cli; do \
+			echo "  Mirroring $${image}:$(OPENSHELL_VERSION)..."; \
+			if oc image mirror $(QUAY_REPO)/$${image}:$(OPENSHELL_VERSION) $${REGISTRY}/$(BUILD_NS)/$${image}:$(OPENSHELL_VERSION) --insecure=true 2>&1 | tail -1; then \
+				oc tag $(BUILD_NS)/$${image}:$(OPENSHELL_VERSION) $(BUILD_NS)/$${image}:latest 2>/dev/null || true; \
+				echo "  $${image} done."; \
+			else \
+				echo "  $${image} not found on quay — skipping."; \
+			fi; \
+		done; \
+		echo "All images mirrored (tag: $(OPENSHELL_VERSION), also tagged as :latest)."; \
+	fi
+
+# Clean stale operator CRDs from a previous install that block reinstallation.
+# CNV leaves CRDs with broken conversion webhooks; RHBK CSV races the OperatorGroup.
+# Safe to run on a clean cluster (no-ops if nothing stale exists).
+clean-stale-operators:
+	@echo "Cleaning stale operator CRDs (if any)..."
+	@for crd in $$(oc get crd 2>/dev/null | grep -E 'kubevirt|hco|cdi|aaq|hpp|ssp|cnao' | awk '{print $$1}'); do \
+		oc patch crd "$$crd" --type json -p '[{"op":"replace","path":"/spec/conversion","value":{"strategy":"None"}}]' 2>/dev/null || true; \
+		oc delete crd "$$crd" 2>/dev/null || true; \
+	done
+	@for app in $$(oc get application -n vp-gitops -o name 2>/dev/null); do \
+		oc patch $$app -n vp-gitops --type json -p '[{"op":"remove","path":"/metadata/finalizers"}]' 2>/dev/null || true; \
+	done
+	@echo "Stale operator cleanup done."
+
+# Delete VMs, HyperConverged CR, and operator CRDs before uninstall so
+# ArgoCD doesn't get stuck on webhook finalizers. Then clean stale state.
+pre-uninstall:
+	@echo "Pre-uninstall: deleting VMs and CNV resources..."
+	-@oc delete vm --all -n $(NS) --wait=false 2>/dev/null
+	-@oc delete dv --all -n $(NS) --wait=false 2>/dev/null
+	-@oc delete job --all -n $(NS) --wait=false 2>/dev/null
+	-@oc delete hyperconverged --all -n openshift-cnv --wait=false 2>/dev/null
+	@echo "Waiting for VMs to terminate..."
+	-@sleep 15
+	$(MAKE) clean-stale-operators
+
+# Generate SSH keys before install. No deletions — safe to run repeatedly.
+pattern-install: generate-keys
+
+# Override Makefile-common's uninstall to handle missing pattern CR gracefully.
+uninstall: pre-uninstall ## Uninstall the pattern (with pre-cleanup)
+	@if oc get patterns secure-agent-workspace -n patterns-operator >/dev/null 2>&1; then \
+		$(ANSIBLE_RUN) rhvp.cluster_utils.uninstall; \
+	else \
+		echo "Pattern CR not found — already uninstalled. Cleaning up namespace..."; \
+		oc delete ns $(NS) --wait=false 2>/dev/null || true; \
+	fi
+
+# Clean up a single sandbox's heavy resources before uninstall to prevent
+# finalizer hangs. VMs and DataVolumes take time to terminate and block
+# ArgoCD app deletion. Scoped to OPENSHELL_SAW_NAME only — NOT named
+# "uninstall"/"pre-uninstall", since those names collide with the
+# pre-existing `uninstall` target in Makefile-common (the one
+# `./pattern.sh make uninstall` calls). Make merges prerequisite lists
+# across repeated target definitions, so reusing that name here would
+# silently attach this namespace-wide cleanup to every future call of the
+# framework's own uninstall target, deleting every sandbox VM/DataVolume in
+# a shared namespace instead of just this one.
+sandbox-pre-delete: .check-saw-name
+	@echo "Cleaning up heavy resources for '$(OPENSHELL_SAW_NAME)' before uninstall..."
+	-@oc delete vm $(OPENSHELL_SAW_NAME) -n $(NS) --wait=false 2>/dev/null
+	-@oc delete dv $(OPENSHELL_SAW_NAME)-root -n $(NS) --wait=false 2>/dev/null
+	-@oc delete job $(OPENSHELL_SAW_NAME)-setup -n $(NS) --wait=false 2>/dev/null
+	@echo "Heavy resources for '$(OPENSHELL_SAW_NAME)' scheduled for deletion."
+
+# --- Keycloak / OIDC ---
+
+keycloak: ## Deploy Keycloak instance + realm via RHBK operator
+	@KEYCLOAK_NS=$(KEYCLOAK_NS) KEYCLOAK_CHART=$(KEYCLOAK_CHART) \
+	$(SCRIPTS_DIR)/deploy-keycloak.sh
+
+keycloak-issuer: ## Print the Keycloak OIDC issuer URL
+	@host=$$(oc get keycloak openshell-keycloak -n $(KEYCLOAK_NS) -o jsonpath='{.status.externalURL}' 2>/dev/null \
+		| sed 's|^https://||;s|/$$||'); \
+	if [ -z "$${host}" ]; then \
+		host=$$(oc get route -n $(KEYCLOAK_NS) -l app=keycloak -o jsonpath='{.items[0].spec.host}' 2>/dev/null); \
+	fi; \
+	if [ -z "$${host}" ]; then \
+		echo "Error: Keycloak not found. Run 'make keycloak' first." >&2; \
+		exit 1; \
+	fi; \
+	echo "https://$${host}/realms/openshell"
+
+login: ## Authenticate with the OIDC provider
+	@OIDC_ISSUER=$(OIDC_ISSUER) OIDC_CLIENT_ID=$(OIDC_CLIENT_ID) \
+	OIDC_FLOW=$(OIDC_FLOW) OIDC_TOKEN_DIR=$(OIDC_TOKEN_DIR) NS=$(NS) \
+	$(SCRIPTS_DIR)/oidc-login.sh login
+
+whoami: ## Show current OIDC identity and token status
+	@OIDC_TOKEN_DIR=$(OIDC_TOKEN_DIR) $(SCRIPTS_DIR)/oidc-login.sh whoami
+
+logout: ## Revoke OIDC token and clear sandbox credentials
+	@OIDC_CLIENT_ID=$(OIDC_CLIENT_ID) OIDC_TOKEN_DIR=$(OIDC_TOKEN_DIR) \
+	$(SCRIPTS_DIR)/oidc-login.sh logout
+	@NS=$(NS) SSH_KEY_PATH=$(SSH_KEY_PATH) $(SCRIPTS_DIR)/openshell-saw-logout.sh
+
+delete-keycloak: ## Uninstall Keycloak + PostgreSQL
+	-helm uninstall openshell-keycloak --namespace $(KEYCLOAK_NS) 2>/dev/null
+	-oc delete pvc keycloak-db -n $(KEYCLOAK_NS) 2>/dev/null
+	-oc delete secret keycloak-db-secret -n $(KEYCLOAK_NS) 2>/dev/null
+	@echo "Keycloak cleaned up."
+
+# --- SSH secret ---
+
+ssh-secret: ## Create SSH key secrets for sandbox Jobs
+	oc -n $(NS) create secret generic openshell-aap-ssh \
+		--from-file=key=$(SSH_KEY_PATH) \
+		--dry-run=client -o yaml | oc apply -f -
+	oc -n $(NS) create secret generic openshell-ssh-pubkey \
+		--from-file=key=$(SSH_KEY_PATH).pub \
+		--dry-run=client -o yaml | oc apply -f -
+
+# --- Sandbox ---
+
+openshell-saw-create: .check-saw-name .check-ssh-key ssh-secret ## Provision a sandbox (PROVIDER=, MODEL=, API_KEY=, CONTAINER_RUNTIME=docker|podman)
+	@NS=$(NS) OPENSHELL_SAW_NAME=$(OPENSHELL_SAW_NAME) SAW_CHART=$(SAW_CHART) \
+	SANDBOX_IMAGE=$(SANDBOX_IMAGE) SSH_PUBKEY="$(SSH_PUBKEY)" AGENT=$(AGENT) \
+	PROVIDER=$(PROVIDER) MODEL=$(MODEL) API_KEY=$(API_KEY) \
+	ENDPOINT_URL=$(ENDPOINT_URL) WEB_SEARCH=$(WEB_SEARCH) GCP_SA_JSON=$(GCP_SA_JSON) \
+	OIDC_ISSUER=$(OIDC_ISSUER) OIDC_CLIENT_ID=$(OIDC_CLIENT_ID) \
+	OIDC_TOKEN_DIR=$(OIDC_TOKEN_DIR) OWNER=$(OWNER) \
+	NAMESPACE_MODE=$(NAMESPACE_MODE) SCRIPTS_DIR=$(SCRIPTS_DIR) \
+	CONTAINER_RUNTIME=$(CONTAINER_RUNTIME) \
+	GOVERNANCE_ENABLED=$(GOVERNANCE_ENABLED) \
+	$(SCRIPTS_DIR)/openshell-saw-create.sh
+
+openshell-saw-configure-gateway: .check-saw-name ## Configure openshell CLI for a sandbox gateway
+	@command -v openshell >/dev/null 2>&1 || { echo "Error: openshell CLI not found."; exit 1; }
+	@GW_URL=$$(oc get route $(OPENSHELL_SAW_NAME)-gateway -n $(NS) -o jsonpath='https://{.spec.host}' 2>/dev/null); \
+	if [ -z "$$GW_URL" ]; then echo "Error: Gateway route not found for '$(OPENSHELL_SAW_NAME)'."; exit 1; fi; \
+	OIDC_ISSUER="$(OIDC_ISSUER)"; \
+	if [ -z "$$OIDC_ISSUER" ]; then \
+		KC_HOST=$$(oc get keycloak openshell-keycloak -n $(KEYCLOAK_NS) -o jsonpath='{.status.externalURL}' 2>/dev/null \
+			| sed 's|^https://||;s|/$$||'); \
+		if [ -z "$$KC_HOST" ]; then \
+			KC_HOST=$$(oc get route -n $(KEYCLOAK_NS) -l app=keycloak -o jsonpath='{.items[0].spec.host}' 2>/dev/null); \
+		fi; \
+		if [ -n "$$KC_HOST" ]; then OIDC_ISSUER="https://$$KC_HOST/realms/openshell"; fi; \
+	fi; \
+	OIDC_OPTS=""; \
+	if [ -n "$$OIDC_ISSUER" ]; then OIDC_OPTS="--oidc-issuer $$OIDC_ISSUER --oidc-client-id $(OIDC_CLIENT_ID)"; fi; \
+	GW_CONFIG_DIR="$$HOME/.config/openshell/gateways/$(OPENSHELL_SAW_NAME)"; \
+	NS=$(NS) VM_NAME=$(OPENSHELL_SAW_NAME) SSH_KEY_PATH=$(SSH_KEY_PATH) \
+	OUT_FILE="$$GW_CONFIG_DIR/mtls/ca.crt" \
+	$(SCRIPTS_DIR)/extract-gateway-ca.sh || exit 1; \
+	echo "Registering gateway '$(OPENSHELL_SAW_NAME)'..."; \
+	openshell gateway remove $(OPENSHELL_SAW_NAME) 2>/dev/null || true; \
+	openshell gateway add "$$GW_URL" --name $(OPENSHELL_SAW_NAME) $$OIDC_OPTS; \
+	openshell gateway select $(OPENSHELL_SAW_NAME); \
+	echo "Gateway '$(OPENSHELL_SAW_NAME)' configured. Endpoint: $$GW_URL"; \
+	OIDC_TOKEN_FILE="$(OIDC_TOKEN_DIR)/token.json"; \
+	GW_TOKEN_DIR="$$GW_CONFIG_DIR"; \
+	if [ -f "$$OIDC_TOKEN_FILE" ] && [ -n "$$OIDC_ISSUER" ]; then \
+		echo "Copying OIDC token to gateway config..."; \
+		mkdir -p "$$GW_TOKEN_DIR"; \
+		chmod 700 "$$GW_TOKEN_DIR"; \
+		python3 -c " \
+import json; \
+t = json.load(open('$$OIDC_TOKEN_FILE')); \
+gt = {'access_token': t['access_token'], 'refresh_token': t.get('refresh_token',''), 'issuer': t.get('issuer_url',''), 'client_id': '$(OIDC_CLIENT_ID)'}; \
+json.dump(gt, open('$$GW_TOKEN_DIR/oidc_token.json','w'))" 2>/dev/null && \
+		chmod 600 "$$GW_TOKEN_DIR/oidc_token.json" 2>/dev/null && \
+		echo "Token configured." || \
+		echo "Token copy skipped (already authenticated via gateway login)."; \
+	fi
+
+openshell-saw-list: ## List all sandboxes
+	@printf "%-20s %-12s %-10s %s\n" "NAME" "STATUS" "VM" "CREATED"
+	@helm list -n $(NS) --filter '.*' -o json 2>/dev/null \
+		| jq -r '.[] | select(.chart | startswith("openshell-saw")) | .name' 2>/dev/null \
+		| while read -r name; do \
+			status=$$(helm status "$$name" -n $(NS) -o json 2>/dev/null | jq -r '.info.status // "unknown"'); \
+			vm=$$(kubectl get vm "$$name" -n $(NS) -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "n/a"); \
+			created=$$(helm list -n $(NS) --filter "^$${name}$$" -o json 2>/dev/null | jq -r '.[0].updated | split(".")[0]' 2>/dev/null); \
+			printf "%-20s %-12s %-10s %s\n" "$$name" "$$status" "$$vm" "$$created"; \
+		done
+
+openshell-saw-logs: .check-saw-name ## Follow sandbox setup Job logs
+	oc -n $(NS) logs -f job/$(OPENSHELL_SAW_NAME)-setup
+
+openshell-saw-ssh: .check-saw-name .check-gateway-ca ## SSH into a sandbox
+	@ssh -o "ProxyCommand=openshell ssh-proxy --gateway-name $(OPENSHELL_SAW_NAME) --name $(OPENSHELL_SAW_NAME) " \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR \
+		sandbox@openshell-$(OPENSHELL_SAW_NAME).default
+
+# --- User access ---
+
+nemoclaw-tui: .check-saw-name .check-gateway-ca ## Launch NemoClaw TUI (e.g. make nemoclaw-tui SANDBOX_NAME=cuda-sandbox WORKSPACE=cuda-dev)
+	@if [ -n "$(SANDBOX_NAME)" ]; then \
+		SANDBOX="$(SANDBOX_NAME)"; \
+	else \
+		SANDBOX=$$(openshell --gateway $(OPENSHELL_SAW_NAME) sandbox list --workspace $(WORKSPACE) --names 2>/dev/null | grep -E '^[a-zA-Z0-9_-]+$$' | head -1); \
+	fi; \
+	if [ -z "$$SANDBOX" ]; then echo "Error: No sandboxes found on gateway '$(OPENSHELL_SAW_NAME)' workspace '$(WORKSPACE)'."; exit 1; fi; \
+	echo "Connecting to sandbox '$$SANDBOX' workspace '$(WORKSPACE)' (nemoclaw)..."; \
+	ssh -o "ProxyCommand=openshell ssh-proxy --gateway-name $(OPENSHELL_SAW_NAME) --name $$SANDBOX --workspace $(WORKSPACE) " \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR \
+		-tt sandbox@openshell-$$SANDBOX.$(WORKSPACE) openclaw
+
+SAW_SANDBOX_TUI := $(if $(SANDBOX_NAME),$(SANDBOX_NAME),$(shell openshell --gateway $(OPENSHELL_SAW_NAME) sandbox list --workspace $(WORKSPACE) --names 2>/dev/null | grep -E '^[a-zA-Z0-9_-]+' | head -1))
+
+openclaw-tui: .check-saw-name .check-gateway-ca ## Launch OpenClaw TUI (e.g. make openclaw-tui SANDBOX_NAME=notebook)
+	@if [ -z "$(SAW_SANDBOX_TUI)" ]; then echo "Error: No sandboxes found on gateway '$(OPENSHELL_SAW_NAME)' workspace '$(WORKSPACE)'."; exit 1; fi
+	@echo "Connecting to sandbox '$(SAW_SANDBOX_TUI)' workspace '$(WORKSPACE)' (openclaw)..."
+	@openshell --gateway $(OPENSHELL_SAW_NAME) sandbox exec -n $(SAW_SANDBOX_TUI) --workspace $(WORKSPACE) --no-tty -- \
+		/bin/bash -c 'export HOME=/sandbox OPENCLAW_HOME=/sandbox SQLITE_TMPDIR=/sandbox/.openclaw/state TMPDIR=/sandbox/.openclaw/state OPENCLAW_NIX_MODE=0; nohup openclaw gateway run --allow-unconfigured --bind loopback --port 18789 >> /tmp/openclaw-gateway.log 2>&1 & sleep 1; exit 0'
+	@for i in $$(seq 1 60); do \
+		openshell --gateway $(OPENSHELL_SAW_NAME) sandbox exec -n $(SAW_SANDBOX_TUI) --workspace $(WORKSPACE) --no-tty -- \
+			curl -sf --max-time 3 http://127.0.0.1:18789/health >/dev/null 2>&1 && break; \
+		sleep 5; \
+	done
+	@openshell --gateway $(OPENSHELL_SAW_NAME) sandbox exec -n $(SAW_SANDBOX_TUI) --workspace $(WORKSPACE) --tty -- \
+		/bin/bash -ic 'export HOME=/sandbox OPENCLAW_HOME=/sandbox SQLITE_TMPDIR=/sandbox/.openclaw/state TMPDIR=/sandbox/.openclaw/state OPENCLAW_NIX_MODE=0 TERM=xterm-256color; exec openclaw tui'
+
+openshell-saw-tui: .check-saw-name ## Launch TUI (alias for nemoclaw-tui)
+	@$(MAKE) nemoclaw-tui OPENSHELL_SAW_NAME=$(OPENSHELL_SAW_NAME) SANDBOX_NAME=$(SANDBOX_NAME) WORKSPACE=$(WORKSPACE)
+
+nemoclaw-gui: .check-saw-name .check-gateway-ca ## Open NemoClaw web UI (e.g. make nemoclaw-gui SANDBOX_NAME=cuda-sandbox WORKSPACE=cuda-dev)
+	@if [ -n "$(SANDBOX_NAME)" ]; then \
+		SANDBOX="$(SANDBOX_NAME)"; \
+	else \
+		SANDBOX=$$(openshell --gateway $(OPENSHELL_SAW_NAME) sandbox list --workspace $(WORKSPACE) --names 2>/dev/null | grep -E '^[a-zA-Z0-9_-]+$$' | head -1); \
+	fi; \
+	if [ -z "$$SANDBOX" ]; then echo "Error: No sandboxes found."; exit 1; fi; \
+	SANDBOX_NAME=$$SANDBOX GATEWAY_NAME=$(OPENSHELL_SAW_NAME) \
+	WORKSPACE=$(WORKSPACE) GUI_PORT=$(GUI_PORT) $(SCRIPTS_DIR)/openshell-saw-gui.sh
+
+openclaw-gui: .check-saw-name .check-gateway-ca ## Open OpenClaw web UI (e.g. make openclaw-gui SANDBOX_NAME=notebook GUI_PORT=28789)
+	@if [ -n "$(SANDBOX_NAME)" ]; then \
+		SANDBOX="$(SANDBOX_NAME)"; \
+	else \
+		SANDBOX=$$(openshell --gateway $(OPENSHELL_SAW_NAME) sandbox list --workspace $(WORKSPACE) --names 2>/dev/null | grep -E '^[a-zA-Z0-9_-]+$$' | head -1); \
+	fi; \
+	if [ -z "$$SANDBOX" ]; then echo "Error: No sandboxes found."; exit 1; fi; \
+	echo "Fetching openclaw gateway token..."; \
+	TOKEN=$$(openshell sandbox exec -n $$SANDBOX --workspace $(WORKSPACE) --no-tty -- \
+		sh -c 'OPENCLAW_HOME=/sandbox cat /sandbox/.openclaw/openclaw.json' 2>/dev/null \
+		| python3 -c "import sys,json; c=json.load(sys.stdin); print(c.get('gateway',{}).get('auth',{}).get('token',''))" 2>/dev/null || true); \
+	if [ -z "$$TOKEN" ]; then echo "Error: Could not extract token."; exit 1; fi; \
+	GUI_PORT=$${GUI_PORT:-18789}; \
+	pids=$$(lsof -ti :$$GUI_PORT 2>/dev/null || true); \
+	[ -n "$$pids" ] && kill $$pids 2>/dev/null && sleep 1; \
+	echo ""; \
+	echo "OpenClaw UI: http://localhost:$$GUI_PORT/#token=$$TOKEN"; \
+	echo "Press Ctrl-C to stop."; \
+	echo ""; \
+	ssh -o "ProxyCommand=openshell ssh-proxy --gateway-name $(OPENSHELL_SAW_NAME) --name $$SANDBOX" \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR \
+		-L "$$GUI_PORT:127.0.0.1:18789" \
+		-N sandbox@openshell-$$SANDBOX.$(WORKSPACE)
+
+openshell-saw-gui: .check-saw-name ## Open web UI (alias for nemoclaw-gui)
+	@$(MAKE) nemoclaw-gui OPENSHELL_SAW_NAME=$(OPENSHELL_SAW_NAME) SANDBOX_NAME=$(SANDBOX_NAME) WORKSPACE=$(WORKSPACE) GUI_PORT=$(GUI_PORT)
+
+# --- Governance profiles ---
+
+PROFILE_NAME   ?=
+PROFILE_FILE   ?=
+
+governance-list-profiles: ## List governance provider profiles
+	@NS=$(NS) SAW_NAME=$(OPENSHELL_SAW_NAME) $(SCRIPTS_DIR)/governance-profile.sh list
+
+governance-add-profile: ## Enable an existing profile (PROFILE_NAME=github)
+	@NS=$(NS) SAW_NAME=$(OPENSHELL_SAW_NAME) $(SCRIPTS_DIR)/governance-profile.sh add $(PROFILE_NAME)
+
+governance-remove-profile: ## Disable a provider profile (PROFILE_NAME=github)
+	@NS=$(NS) SAW_NAME=$(OPENSHELL_SAW_NAME) $(SCRIPTS_DIR)/governance-profile.sh remove $(PROFILE_NAME)
+
+governance-create-profile: ## Create a new profile from YAML (PROFILE_NAME=jira PROFILE_FILE=jira.yaml)
+	@NS=$(NS) SAW_NAME=$(OPENSHELL_SAW_NAME) $(SCRIPTS_DIR)/governance-profile.sh create $(PROFILE_NAME) $(PROFILE_FILE)
+
+governance-demo: .check-saw-name ## Run governance interceptor demo
+	@$(SCRIPTS_DIR)/demo-governance.sh $(OPENSHELL_SAW_NAME)
+
+# --- Test ---
+
+test: ## Run headless E2E test (auto-detects provider from ~/values-secret.yaml)
+	@$(SCRIPTS_DIR)/e2e-test.sh
+
+# --- Teardown ---
+
+openshell-saw-delete: sandbox-pre-delete ## Uninstall a sandbox
+	helm uninstall $(OPENSHELL_SAW_NAME) --namespace $(NS)
+
+delete-all: ## Uninstall everything (keycloak + imagestreams + gateway image)
+	-helm uninstall openshell-keycloak --namespace $(NS) 2>/dev/null
+	-helm uninstall openshell-gateway-image --namespace $(NS) 2>/dev/null
+	-helm uninstall nemoclaw-imagestream --namespace $(NS) 2>/dev/null
+	-helm uninstall nemoclaw-cli-imagestream --namespace $(NS) 2>/dev/null
+	@echo "Note: sandbox releases must be uninstalled individually."
+
+# --- Status ---
+
+status: ## Show status of all OpenShell resources
+	@echo "=== Helm releases ===" && helm list -n $(NS) 2>/dev/null || true
+	@echo "" && echo "=== VMs ===" && oc -n $(NS) get vm 2>/dev/null || true
+	@echo "" && echo "=== VMIs ===" && oc -n $(NS) get vmi 2>/dev/null || true
+	@echo "" && echo "=== ImageStreams ===" && oc -n $(NS) get is 2>/dev/null || true
+	@echo "" && echo "=== Builds ===" && oc -n $(NS) get builds 2>/dev/null || true
+	@echo "" && echo "=== Jobs ===" && oc -n $(NS) get jobs 2>/dev/null || true

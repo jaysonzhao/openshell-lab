@@ -1,0 +1,203 @@
+# NeMo Guardrails Helm Chart
+# Deploys a NeMo Guardrails server via the TrustyAI operator
+
+name: nemo-guardrails
+
+# LLM connection — any OpenAI-compatible endpoint (in-cluster KServe predictor
+# or a remote Model-as-a-Service gateway). The rendered config.yaml references
+# these values, so they are the single source of truth for the model connection.
+llm:
+  # Required: set BOTH at install time with --set llm.baseUrl=... and
+  # --set llm.modelName=..., and repeat every llm value on each upgrade —
+  # Helm discards install-time --set values when an upgrade adds any new
+  # --set flag. Participants supply their own OpenAI-compatible endpoint;
+  # the values below are placeholders so the chart still renders and lints
+  # without overrides.
+  baseUrl: "https://REPLACE-WITH-YOUR-MODEL-ENDPOINT/v1"
+  modelName: "REPLACE-WITH-YOUR-MODEL-NAME"
+  engine: openai
+  # API key for the LLM endpoint. Supplied by the user at install time (e.g.
+  # --set llm.apiKey="$LLM_API_KEY"); never commit a key to this file. If set,
+  # the chart creates a Secret (<name>-llm-credentials) and injects the key
+  # into the guardrails pod as this environment variable.
+  # Note: the key is visible in the NemoGuardrails CR spec and pod spec. On
+  # shared clusters prefer apiKeySecretName below.
+  apiKey: ""
+  apiKeyEnvVar: OPENAI_API_KEY
+  # Alternatively, reference an existing Secret that must contain an
+  # `api-key` key. Injected via valueFrom.secretKeyRef — verify the TrustyAI
+  # operator passes it through to the pod before relying on it.
+  apiKeySecretName: ""
+
+# --------------------------------------------------------------------------
+# Guardrails config — paste your config.yaml and rails.co content directly.
+# The content is rendered as a Helm template, so it may reference chart
+# values (e.g. {{ .Values.llm.baseUrl }}). Escape literal {{ }} as {{`{{`}}.
+# --------------------------------------------------------------------------
+config: |
+  models:
+    - type: main
+      engine: {{ .Values.llm.engine }}
+      model: {{ .Values.llm.modelName }}
+      # The server's LLM HTTP client reads the key from the env var named
+      # here (model-level, like the llama_guard entry) — without this it
+      # never sees the injected OPENAI_API_KEY and every model call 401s.
+      api_key_env_var: {{ .Values.llm.apiKeyEnvVar }}
+      parameters:
+        base_url: "{{ .Values.llm.baseUrl }}"
+  {{- if .Values.llamaGuard.enabled }}
+    - type: llama_guard
+      engine: openai
+      model: {{ .Values.llamaGuard.modelName }}
+      api_key_env_var: {{ .Values.llamaGuard.apiKeyEnvVar }}
+      parameters:
+        base_url: "{{ .Values.llamaGuard.baseUrl }}"
+  {{- end }}
+  rails:
+    config:
+      regex_detection:
+        input:
+          patterns:
+            - "\\d{3}-\\d{2}-\\d{4}"
+            - "\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}"
+            - "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
+            - "\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}"
+            - "\\b(password|hack|exploit|vulnerability|secret|api[_-]?key|token)\\b"
+            - "\\b(violence|illegal|harmful)\\b"
+            - "\\b(chatgpt|openai|claude|anthropic)\\b"
+          case_insensitive: true
+        output:
+          patterns:
+            - "\\d{3}-\\d{2}-\\d{4}"
+            - "\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}"
+            - "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
+            - "\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}"
+            - "\\b(chatgpt|openai|claude|anthropic)\\b"
+            - "\\b(confidential|internal[_-]?only|do[_-]?not[_-]?share)\\b"
+          case_insensitive: true
+      sensitive_data_detection:
+        input:
+          entities:
+            - CREDIT_CARD
+            - US_SSN
+            - EMAIL_ADDRESS
+            - PHONE_NUMBER
+        output:
+          entities:
+            - CREDIT_CARD
+            - US_SSN
+    input:
+      flows:
+        - detect sensitive data on input
+        - regex check input
+      {{- if .Values.llamaGuard.enabled }}
+        - llama guard check input
+      {{- end }}
+    output:
+      streaming:
+        enabled: true
+      flows:
+        - detect sensitive data on output
+        - regex check output
+      {{- if .Values.llamaGuard.enabled }}
+        - llama guard check output
+      {{- end }}
+  {{- if .Values.llamaGuard.enabled }}
+  prompts:
+    - task: llama_guard_check_input
+      content: |
+        <s>[INST] Task: Check if there is unsafe content in 'User' messages in conversations according our safety policy with the below categories.
+
+        <BEGIN UNSAFE CONTENT CATEGORIES>
+        S1: Violent Crimes.
+        S2: Non-Violent Crimes.
+        S3: Sex-Related Crimes.
+        S4: Child Sexual Exploitation.
+        S5: Defamation.
+        S6: Specialized Advice.
+        S7: Privacy.
+        S8: Intellectual Property.
+        S9: Indiscriminate Weapons.
+        S10: Hate.
+        S11: Suicide & Self-Harm.
+        S12: Sexual Content.
+        S13: Elections.
+        S14: Code Interpreter Abuse.
+        <END UNSAFE CONTENT CATEGORIES>
+
+        <BEGIN CONVERSATION>
+
+        User: {{`{{ user_input }}`}}
+
+        <END CONVERSATION>
+
+        Provide your safety assessment with ONLY the following single word as output on the first line: 'safe' or 'unsafe'.[/INST]
+    - task: llama_guard_check_output
+      content: |
+        <s>[INST] Task: Check if there is unsafe content in 'Agent' messages in conversations according our safety policy with the below categories.
+
+        <BEGIN UNSAFE CONTENT CATEGORIES>
+        S1: Violent Crimes.
+        S2: Non-Violent Crimes.
+        S3: Sex-Related Crimes.
+        S4: Child Sexual Exploitation.
+        S5: Defamation.
+        S6: Specialized Advice.
+        S7: Privacy.
+        S8: Intellectual Property.
+        S9: Indiscriminate Weapons.
+        S10: Hate.
+        S11: Suicide & Self-Harm.
+        S12: Sexual Content.
+        S13: Elections.
+        S14: Code Interpreter Abuse.
+        <END UNSAFE CONTENT CATEGORIES>
+
+        <BEGIN CONVERSATION>
+
+        User: {{`{{ user_input }}`}}
+
+        Agent: {{`{{ bot_response }}`}}
+
+        <END CONVERSATION>
+
+        Provide your safety assessment with ONLY the following single word as output on the first line: 'safe' or 'unsafe'.[/INST]
+  {{- end }}
+
+colang: |
+  # All rails use built-in flows (regex check, detect sensitive data).
+  # No custom Colang flows needed.
+
+# --------------------------------------------------------------------------
+# Content safety detector model (NemoGuard 8B via vLLM) — optional
+# --------------------------------------------------------------------------
+contentSafety:
+  deploy: false
+  modelUri: oci://registry.apps.ocp.cloud.rhai-tmm.dev/modelcars/modelcar-maker:nvidia--llama-3_1-nemoguard-8b-content-safety-modelcar
+  runtime:
+    image: "registry.redhat.io/rhaiis/vllm-cuda-rhel9@sha256:ec799bb5eeb7e25b4b25a8917ab5161da6b6f1ab830cbba61bba371cffb0c34d"
+  gpu:
+    resourceType: "nvidia.com/gpu"
+    count: "1"
+
+# --------------------------------------------------------------------------
+# Llama Guard content moderation — a remote hosted model (no GPU needed).
+# When enabled, a llama_guard model entry is added to the rendered config and
+# the llama guard check rails run on input and output.
+# --------------------------------------------------------------------------
+llamaGuard:
+  enabled: false
+  # Required when enabled: set BOTH at upgrade time with
+  # --set llamaGuard.baseUrl=... and --set llamaGuard.apiKey=...
+  # The facilitator provides the endpoint and key; the value below is a
+  # placeholder so the chart still renders and lints without overrides.
+  baseUrl: "https://REPLACE-WITH-YOUR-LLAMA-GUARD-ENDPOINT/v1"
+  modelName: "Llama-Guard-3-1B"
+  # API key for the Llama Guard endpoint. Supplied by the user at upgrade time
+  # (e.g. --set llamaGuard.apiKey="$LLAMA_GUARD_API_KEY"); never commit a key
+  # to this file. If set, the chart creates a Secret and injects the key into
+  # the guardrails pod as this environment variable.
+  # Note: the key is visible in the NemoGuardrails CR spec and pod spec. On
+  # shared clusters prefer a pre-created Secret and apiKeySecretName.
+  apiKey: ""
+  apiKeyEnvVar: LLAMA_GUARD_API_KEY

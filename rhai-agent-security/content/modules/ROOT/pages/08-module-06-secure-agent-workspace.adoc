@@ -1,0 +1,265 @@
+= Module 6: Secure Agent Workspace
+:navtitle: Secure Agent Workspace
+
+This module traces the deployed Secure Agent Workspace (SAW) controls across
+OpenShift Virtualization, Keycloak, Vault and External Secrets, OpenShell, and
+Argo CD. The goal is to identify ownership and failure boundaries, not only to
+list components.
+
+== Technical context
+
+The raw OpenShell sandbox environment and SAW are not equivalent deployment
+shapes. The raw OpenShell environment makes
+OpenShell policy behavior directly observable in a sandbox pod. This SAW fork
+adds a dedicated VM for the configured workspace owner and places OpenShell and
+the agent runtime inside it. The VM contains a larger runtime boundary, while
+OpenShell still governs capabilities inside that boundary.
+
+== The SAW deployment shape
+
+[source]
+----
+User / CLI / browser
+          |
+       Keycloak OIDC
+          |
+   TLS gateway Route
+          |
+  workspace KubeVirt VM
+  +-------------------------+
+  | OpenShell gateway       |
+  | OpenClaw / NemoClaw     |
+  | container runtime       |
+  | agent sandbox           |
+  +------------+------------+
+               +---- governance interceptor
+
+  Vault + ESO ----> setup Job and runtime secrets
+----
+
+In this workshop deployment, the configured owner receives a dedicated Fedora
+VM managed by OpenShift Virtualization, built from a golden image (a prebuilt,
+validated VM image, so every owner starts from the same known state). OpenShell
+and the agent run inside that
+VM. Additional users require additional provisioned releases or workspace
+automation; this workshop does not prove multi-user provisioning.
+
+== Why the VM boundary matters
+
+Pod isolation is useful for evaluation and for learning the OpenShell control
+plane, but it shares more of the cluster and node execution environment. SAW
+uses a dedicated VM for each provisioned owner/release to provide a stronger
+boundary around:
+
+* the user's agent runtime and local tools;
+* the OpenShell gateway and supervisor that serve that user;
+* workspace data, provider integrations, and host-level changes; and
+* the operational blast radius of a compromised or misconfigured agent.
+
+VM isolation does not replace OpenShell policy. The agent still needs explicit
+filesystem, process, network, inference, identity, and approval controls inside
+the VM. The design is layered: VM isolation contains the larger
+runtime boundary, and OpenShell governs what the agent can do within it.
+This is the answer to the customer question "why a VM instead of a pod?": the
+VM contains the blast radius of the agent runtime and its tools; OpenShell
+still decides what the agent can do inside it.
+
+== What changes from the raw OpenShell evaluation
+
+[cols="1,2,2",options="header"]
+|===
+| Concern | Raw OpenShell, Modules 1-2 | Secure Agent Workspace
+
+| Compute boundary | OpenShell-managed sandbox pod for evaluation | One dedicated KubeVirt VM for the configured owner, with OpenShell and the agent inside it
+
+| Identity | No TLS, no auth; local port-forward only | Keycloak OIDC for CLI and gateway access
+
+| Secrets | No model credential required | Vault values synchronized by External Secrets Operator
+
+| Provisioning | Harness Helm installation | Validated Patterns, ArgoCD, setup Job, BOM, and golden VM image
+
+| Governance | Sandbox policy and gateway audit | Git-reviewed profiles and fail-closed checks on configured interceptor RPC bindings
+
+| Access | Local port-forward | TLS dashboard Route with token-protected Control UI, forwarded into the sandbox by the setup job's authenticated forward (the systemd unit using the gateway's native `openshell forward` RPC); local tunnel for non-forwarded sandboxes
+|===
+
+The evaluation path and SAW are intentionally different deployment layers.
+OpenShell policy concepts carry forward, but the VM boundary, identity,
+secrets, provisioning, and governance services change. Validate versions,
+routes, namespace modes, VM profiles, and provisioning mechanisms for the target
+environment.
+
+== Responsibility boundaries
+
+Keep these responsibilities distinct while diagnosing the environment:
+
+* OpenShift Virtualization supplies the workspace VM boundary.
+* OpenShell contains and governs the agent runtime inside the VM.
+* Keycloak authenticates the OpenShell CLI and administrative dashboard path.
+* Vault and External Secrets deliver provider and workspace credentials without
+  putting them in workshop files or prompts — Vault is the secrets manager,
+  and External Secrets Operator syncs its values into cluster Secrets.
+* The interceptor and ArgoCD turn approved policy data into a repeatable
+  process; configured provider and sandbox creation bindings fail closed —
+  anything outside the governance baseline is refused, never silently allowed.
+
+== Exercise 1: Inspect VM and reconciliation state
+
+Map the running VM and setup Job to their Argo CD-managed applications. Start
+from the SAW checkout root on the control node, then inspect the workload view:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get vm,vmi,dv,job,pods,route
+----
+
+Expected result: the workspace VM, its DataVolume (the disk image backing the
+VM), the setup Job, and the
+dashboard Route are all present in their expected states.
+
+Trace the GitOps ownership:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_gitops_namespace} get applications.argoproj.io \
+  -o custom-columns=NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status
+----
+
+Reading the command: the custom-columns format shows only the three fields a
+reconciliation check needs — name, sync status, health. Every owning
+application should be `Synced` and `Healthy`.
+
+Confirm the VM carries the labels that tie it to its owners:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get vm/{saw_gateway_name} -o yaml | \
+  grep -E 'argocd.argoproj.io|app.kubernetes.io|helm.sh'
+----
+
+Expected result: the `argocd.argoproj.io`, `app.kubernetes.io`, and `helm.sh`
+labels appear — the audit trail from the pattern to the VM.
+
+List the BOM sandboxes the gateway vends — creates and serves on request:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+make openshell-saw-list
+----
+
+GUI views: the OpenShift Console (Virtualization > VirtualMachines) shows the
+workspace VM, and the Argo CD UI for the `{saw_gitops_namespace}` instance
+shows the same applications with their sync graphs — the two admin surfaces to
+show when demonstrating ownership.
+
+Pass condition: the owning applications are `Synced` and `Healthy`, the VMI is
+`Running`, the setup Job is `Complete`, and the expected BOM sandboxes are
+listed. A failed condition identifies the reconciliation layer to investigate.
+
+== Exercise 2: Inspect identity and access paths
+
+Inspect the gateway and dashboard Routes:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+export OPENSHELL_SAW_NAME={saw_gateway_name}
+oc -n {saw_namespace} get route -o custom-columns=NAME:.metadata.name,HOST:.spec.host,TLS:.spec.tls.termination
+----
+
+Expected result: the gateway and dashboard Routes with TLS termination —
+identity and access run on encrypted Routes, unlike the Module 1 local
+port-forward.
+
+Confirm the authenticated CLI identity and workspace scope:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell gateway select "$OPENSHELL_SAW_NAME"
+openshell status
+openshell sandbox list
+openshell sandbox list --workspace {saw_workspace}
+----
+
+Expected result: the status reports the authenticated identity, and the two
+sandbox lists differ — one per workspace. That difference is the point:
+workspace scope is part of the resource identity.
+
+The same sandbox name can exist in more than one workspace, so operational
+commands must select the workspace explicitly. The interaction remains
+familiar while the platform replaces the pod boundary with VM isolation, OIDC,
+and centralized governance.
+
+The OpenShell gateway uses Keycloak OIDC. The OpenClaw Control UI has a separate
+token and device-pairing boundary; do not describe its token as a Keycloak
+session.
+
+== Exercise 3: Trace secret delivery without reading secret values
+
+Inspect resource names and references only. Do not print Secret data. First
+the delivery objects:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get externalsecret,secretstore 2>/dev/null || true
+oc -n {saw_namespace} get secret -o name
+----
+
+Expected result: the ExternalSecret and SecretStore objects that sync values
+from Vault, and the Secret names they create — names only, never `-o yaml` on
+a Secret.
+
+Then the consumption side:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get job/{saw_gateway_name}-setup \
+  -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
+oc -n {saw_namespace} get job/{saw_gateway_name}-setup -o yaml | \
+  grep -E 'secretKeyRef|secretName|serviceAccountName'
+----
+
+Reading the commands: the jsonpath prints the service account the setup Job
+runs as; the grep shows which Secret references the Job template carries.
+Together with the first command pair, this identifies the chain: which
+ExternalSecret creates each Secret and which setup Job consumes it.
+
+Resource references prove delivery
+plumbing; they do not prove rotation behavior unless a rotation is performed and
+observed.
+
+== Exercise 4: Inspect governance as policy data
+
+include::secure-agent-workspace:ROOT:partial$deployment/governance.adoc[]
+
+== Evidence checkpoint
+
+Record:
+
+* the VMI phase and setup Job completion state;
+* the Argo CD application sync and health state;
+* the selected gateway and workspace-scoped sandbox list;
+* the ExternalSecret-to-Secret-to-Job reference chain; and
+* the governance profile source and active profile listing.
+
+.Answer key
+[%collapsible]
+====
+* The VMI phase is `Running` and the setup Job is `Complete`.
+* The owning Argo CD applications are `Synced` and `Healthy`.
+* The gateway is the selected `{saw_gateway_name}` entry and the
+  workspace-scoped list shows `{saw_sandbox}` and `toolbox`.
+* The ExternalSecret-to-Secret-to-Job chain proves the delivery plumbing for
+  provider and SSH material; it does not prove rotation behavior.
+* The governance profile source is the read-only GitHub profile in the workshop
+  checkout, listed by `provider list-profiles`.
+====
+
+These artifacts identify control ownership. They do not establish unified audit,
+image attestation, secret rotation, or multi-user isolation unless those
+behaviors are separately exercised.
+
+Next, complete the model-boundary layer in
+xref:13-module-08-model-boundary-guardrails.adoc[Module 8: Model-Boundary
+Guardrails], or run the
+xref:09-module-07-sre-capstone.adoc[Module 7: SRE Copilot Capstone] when the
+fleet extension is provisioned.

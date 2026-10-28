@@ -1,0 +1,74 @@
+= Cleanup
+:navtitle: Cleanup
+
+Run cleanup from the same control node used for the workshop. Local connection
+cleanup applies to every participant. Cluster cleanup applies only to the owner
+of a dedicated workshop environment.
+
+== Remove the raw OpenShell evaluation
+
+Delete the workshop sandbox while its local port-forward is still available,
+then stop the port-forward. Run these commands from the
+`rhai-agent-security` repository root so the relative automation path is
+unambiguous:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell --gateway {raw_gateway_name} sandbox delete {raw_sandbox_name} 2>/dev/null || true
+openshell --gateway {raw_gateway_name} sandbox delete {raw_openclaw_name} 2>/dev/null || true
+openshell gateway remove {raw_gateway_name} 2>/dev/null || true
+if test -f "$HOME/openshell-port-forward.pid"; then
+  PID=$(cat "$HOME/openshell-port-forward.pid")
+  if ps -p "$PID" -o command= 2>/dev/null | \
+    grep -Eq 'oc .+port-forward .+svc/openshell'; then
+    kill "$PID" 2>/dev/null || true
+  fi
+  rm -f "$HOME/openshell-port-forward.pid"
+fi
+----
+
+If the facilitator provided a shared raw environment, stop after the local
+cleanup above. For a participant-owned environment, remove the cluster
+resources from the `rhai-agent-security` repository root:
+
+[source,bash,role="execute"]
+----
+make -C automation openshell-teardown
+----
+
+The teardown leaves the cluster-scoped Agent Sandbox operator installed because
+another workshop may use it. A cluster administrator can remove that operator
+and its CRDs only after confirming that no other workload depends on them:
+
+[source,bash]
+----
+bash automation/openshell-env/teardown.sh --crd
+----
+
+== Remove a self-deployed Secure Agent Workspace
+
+Do not run this step against a facilitator-managed SAW installation. For a
+self-deployed pattern, first inspect the cluster for unrelated virtual machines
+and DataVolumes:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc get vm,dv -A
+----
+
+The native uninstall target removes SAW namespace resources and may remove the
+HyperConverged resource and OpenShift Virtualization CRDs. Continue only on a
+dedicated cluster with no unrelated virtualization workloads.
+
+include::secure-agent-workspace:ROOT:partial$deployment/cleanup.adoc[]
+
+After cluster cleanup, decide whether to retain or securely delete
+`$HOME/values-secret.yaml` and `$HOME/.generated-ssh-keys`. Then change to the
+SAW checkout root and remove the local SAW gateway registration and cached
+OIDC state according to the control node's credential-retention policy:
+
+[source,bash,subs="attributes+"]
+----
+openshell gateway remove {saw_gateway_name} 2>/dev/null || true
+make logout
+----

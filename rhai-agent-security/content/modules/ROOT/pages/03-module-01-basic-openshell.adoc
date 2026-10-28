@@ -1,0 +1,355 @@
+= Module 1: Deploy and Operate Basic OpenShell
+:navtitle: Basic OpenShell
+
+An agent that can run commands and reach the network has a much larger blast
+radius than a simple chat application, so the safety controls have to live
+outside the model. This module builds that control boundary on plain pods —
+the workshop calls this the *raw track*: no VM layer, every control visible.
+Proving the controls here first makes the production-shaped Secure Agent
+Workspace architecture in later modules more meaningful — and it answers the
+first question customers ask: *what does the agent actually run on?*
+
+In this module you install the Agent Sandbox controller and OpenShell gateway
+on OpenShift, register the gateway with the CLI, create the policy-test sandbox
+used by the Module 2 exercises, and deploy OpenClaw on the pod boundary —
+pods, not VMs.
+
+.New to OpenShell?
+[%collapsible]
+====
+Five names, one sentence each:
+
+* *OpenShell* — the control plane that creates and runs *sandboxes*: isolated,
+  short-lived places where an agent's commands actually execute.
+* *Gateway* — the front door. Every `openshell` CLI command goes through the
+  gateway, which creates and supervises sandboxes.
+* *Sandbox* — the isolated environment where agent commands run. Here it is a
+  pod; in the production modules it is a pod inside a dedicated VM.
+* *OpenClaw* — the agent program itself. It runs *inside* a sandbox.
+* *SAW (Secure Agent Workspace)* — the production-shaped deployment that wraps
+  all of the above in a VM with login (OIDC), secrets, and GitOps.
+====
+
+== Technical context
+
+The Helm release creates the plumbing: the gateway service and the sandbox
+machinery. It does not deploy an agent application. Distinguish the Kubernetes
+resources that host the service from the OpenShell resources that govern an
+individual sandbox.
+
+== Learning objectives
+
+* Deploy the raw OpenShell Helm chart on OpenShift.
+* Explain the Agent Sandbox controller, namespace, SCC admission, Helm release,
+  and gateway storage used by the raw OpenShell baseline.
+* Register the gateway and verify the CLI connection.
+* Create and inspect a disposable sandbox.
+* Deploy OpenClaw on the local gateway and identify the runtime boundary.
+
+== Exercise 1: Deploy the gateway
+
+Use the bundled raw OpenShell sandbox environment automation for the
+participant baseline. It
+intentionally runs unencrypted and unauthenticated, reachable only through a
+local port-forward; the SAW deployment module adds OIDC, TLS, VM isolation, and
+centralized secrets.
+
+Run this module from the `rhai-agent-security` repository root:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+make -C {automation_repo} install-openshell \
+  OPENSHELL_VERSION={openshell_version}
+----
+
+The raw OpenShell installation sequence is:
+
+. Installs the Red Hat Agent Sandbox operator through OLM (OpenShift's
+  operator installer), which provides the Kubernetes `Sandbox` CRDs — the
+  cluster API for sandboxes — and its controller.
+. Creates the `openshell` namespace.
+. Grants the privileged SCC required by this older evaluation baseline. An SCC
+  is a cluster-wide rule governing what a pod may do; production deployments
+  do not use the privileged one.
+. Creates the gateway JWT signing Secret.
+. Installs the NVIDIA OpenShell Helm chart with the raw OpenShift settings.
+. Pins the default sandbox image to `{openshell_sandbox_image}`.
+. Waits for the gateway StatefulSet and its PVC (the gateway pod plus its
+  durable disk).
+. Deploys the in-cluster `http-echo` service (a tiny service that echoes back
+  whatever you send it) used by the Module 2 policy exercises.
+. Leaves the unauthenticated gateway internal to the cluster. The CLI reaches it
+  only through a local port-forward.
+
+Expected result: the script ends with the `Setup complete!` banner and next
+steps. If an earlier step fails, the message names the failing step — fix that
+layer before rerunning.
+
+The privileged SCC is a limitation of this raw OpenShell baseline, not a
+production recommendation. SAW provides the stronger per-user VM boundary used
+later.
+
+Start a local gateway port-forward after the script completes. A port-forward
+is a tunnel from your workstation to a service inside the cluster; the gateway
+is internal to the cluster, so the CLI reaches it through this tunnel only.
+Keep the background process running through Module 2:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {openshell_namespace} port-forward svc/openshell 8080:8080 \
+  >"$HOME/openshell-port-forward.log" 2>&1 &
+echo $! >"$HOME/openshell-port-forward.pid"
+sleep 2
+----
+
+Then register the gateway with the CLI. `gateway add` stores the endpoint,
+`gateway select` makes it the target of every subsequent command, and `status`
+verifies the connection:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell gateway remove {raw_gateway_name} 2>/dev/null || true
+openshell gateway add "http://127.0.0.1:8080" --local --name {raw_gateway_name}
+openshell gateway select {raw_gateway_name}
+openshell status
+----
+
+Expected result: `openshell status` lists `{raw_gateway_name}` as the selected
+gateway and reports a healthy connection through `127.0.0.1:8080`.
+
+[IMPORTANT]
+====
+Do not create an external Route for this gateway. It accepts unauthenticated,
+unencrypted HTTP and is reachable only through the port-forward on this
+workstation — traffic never leaves the machine. The port-forward is what makes
+this acceptable for a lab: exposing the gateway outside the workstation would
+let anyone control sandboxes without a credential. The SAW gateway in Module 4
+is the production-shaped contrast: TLS and Keycloak OIDC on a workspace-VM
+Route.
+====
+
+The Agent Sandbox controller reconciles the sandbox request, while OpenShell
+provides the gateway and supervisor that enforce the runtime boundary. The raw
+OpenShell install deploys the Red Hat Agent Sandbox operator through OLM using
+channel `{agent_sandbox_channel}`.
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {openshell_namespace} rollout status statefulset/openshell
+----
+
+== Exercise 2: Verify the deployment
+
+Check the resources the chart created:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {openshell_namespace} get statefulset,pods,svc,pvc
+oc get crd sandboxes.agents.x-k8s.io
+----
+
+Expected result, reading the output:
+
+* the `openshell` pod is `Running` and the `openshell-data` PVC is `Bound` —
+  the control plane is healthy and its SQLite state has durable storage;
+* the `sandboxes.agents.x-k8s.io` CRD exists — the cluster accepted the sandbox
+  API.
+
+In short: the gateway is up with durable storage, and the cluster knows how to
+run sandboxes.
+
+If the gateway pod is pending instead, inspect the PVC, StorageClass, pod
+events, and StatefulSet status. The privileged SCC applies to sandbox pods, not
+the gateway pod.
+
+GUI view: open the OpenShift Console tab, navigate to
+Workloads > Pods in the `{openshell_namespace}` project, and find the
+`openshell` pod. This is the same view a platform administrator would use to
+answer "what is the agent infrastructure running on?" without the CLI.
+
+== Exercise 3: Create the test sandbox
+
+Create the policy-test sandbox. This is intentionally managed with
+OpenShell, not NemoClaw:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell sandbox create --name {raw_sandbox_name} --no-auto-providers --no-tty -- true
+----
+
+Reading the flags: `--no-auto-providers` keeps the sandbox free of inference
+providers (the raw OpenShell environment needs no model credential),
+`--no-tty` runs it non-interactively, and `-- true` is a placeholder command
+that keeps the
+sandbox alive after startup.
+
+Inspect what was created from both the OpenShell and Kubernetes views:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell sandbox list
+openshell sandbox get {raw_sandbox_name}
+oc -n {openshell_namespace} get pods -o wide
+----
+
+Expected result: the sandbox reports `Ready`, and a matching pod appears in the
+`{openshell_namespace}` namespace. One request produced two views: the gateway
+resource is the OpenShell control-plane object, the `Sandbox` CR is the
+Kubernetes request, and the running pod is the reconciled workload.
+
+In short: you asked once through OpenShell, and you can now verify the same
+sandbox from both the OpenShell and Kubernetes views. That ask-here,
+verify-there habit is the pattern for the rest of the workshop.
+
+The `{raw_sandbox_name}` sandbox is deliberately agent-neutral. It provides a controlled
+baseline before NemoClaw adds OpenClaw configuration, inference, lifecycle, and
+dashboard behavior. The sandbox remains running for the next module.
+
+== Exercise 4: Diagnose and recover gateway connectivity
+
+A control you cannot break and restore is a control you do not understand. This
+exercise proves the CLI really traverses the port-forward — the same
+trust-but-verify habit the policy modules apply to every claim.
+
+Stop the port-forward and confirm the gateway endpoint fails:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+PID=$(cat "$HOME/openshell-port-forward.pid")
+kill "$PID"
+sleep 2
+openshell --gateway {raw_gateway_name} status
+----
+
+Expected result: the command fails. The local endpoint is unreachable because
+nothing forwards to the in-cluster gateway anymore.
+
+Restore the port-forward and confirm recovery:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {openshell_namespace} port-forward svc/openshell 8080:8080 \
+  >"$HOME/openshell-port-forward.log" 2>&1 &
+echo $! >"$HOME/openshell-port-forward.pid"
+sleep 2
+openshell --gateway {raw_gateway_name} status
+----
+
+Expected result: the same command now succeeds through the restored tunnel.
+
+.The full scripted check, including PID validation
+[%collapsible]
+====
+[source,bash,subs="attributes+"]
+----
+PID=$(cat "$HOME/openshell-port-forward.pid")
+ps -p "$PID" -o command= | grep -Eq 'oc .+port-forward .+svc/openshell'
+kill "$PID"
+sleep 2
+
+ENDPOINT_UNREACHABLE=false
+if openshell --gateway {raw_gateway_name} status >/dev/null 2>&1; then
+  echo 'ERROR: gateway remained reachable after stopping the port-forward'
+else
+  ENDPOINT_UNREACHABLE=true
+  echo 'EXPECTED: local gateway endpoint is unavailable'
+fi
+
+oc -n {openshell_namespace} port-forward svc/openshell 8080:8080 \
+  >"$HOME/openshell-port-forward.log" 2>&1 &
+echo $! >"$HOME/openshell-port-forward.pid"
+sleep 2
+openshell --gateway {raw_gateway_name} status
+test "$ENDPOINT_UNREACHABLE" = true
+----
+====
+
+If recovery fails, inspect `$HOME/openshell-port-forward.log`, the Service
+endpoints, and gateway pod readiness before changing the gateway registration.
+
+== Exercise 5: Deploy OpenClaw with OpenShell
+
+So far the raw OpenShell environment has used agent-neutral sandboxes. Deploy
+the OpenClaw runtime on the same gateway to see the agent boundary:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell --gateway {raw_gateway_name} sandbox delete {raw_openclaw_name} 2>/dev/null || true
+openshell --gateway {raw_gateway_name} sandbox create \
+  --name {raw_openclaw_name} --no-auto-providers \
+  --from {raw_openclaw_image} --no-tty -- true
+----
+
+The image pulls on first use, so wait for the sandbox to accept commands:
+
+.Run and wait for readiness
+[%collapsible]
+====
+[source,bash,subs="attributes+"]
+----
+OPENCLAW_READY=false
+for i in $(seq 1 30); do
+  if openshell --gateway {raw_gateway_name} sandbox exec \
+    -n {raw_openclaw_name} -- true >/dev/null 2>&1; then
+    OPENCLAW_READY=true
+    break
+  fi
+  sleep 5
+done
+test "$OPENCLAW_READY" = true
+----
+====
+
+Then confirm the agent runtime is inside the pod:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell --gateway {raw_gateway_name} sandbox exec \
+  -n {raw_openclaw_name} -- openclaw --version
+----
+
+Expected result: `openclaw --version` reports the agent runtime version,
+proving the agent process runs inside the sandbox pod — not on the gateway or
+the workstation. Connect interactively with
+`openshell sandbox connect {raw_openclaw_name}` to see the agent runtime, then
+exit with `exit`.
+
+The local gateway holds no inference provider, so this exercise proves the
+deployment boundary only: OpenClaw runs inside an OpenShell sandbox created and
+governed by that gateway. Model-backed execution arrives in Module 4, where
+the SAW gateway holds the provider and the NemoClaw runtime manages the agent
+lifecycle. The image is pinned to `{raw_openclaw_image}` for the same reason as
+the base sandbox image.
+
+== Evidence checkpoint
+
+Before continuing, verify that you can identify:
+
+* Which cluster-scoped dependency must exist before the Helm chart can create
+  sandboxes?
+* Which SCC the raw OpenShell install uses and which workload receives it.
+* Where is the gateway's SQLite state stored?
+* Which operations are performed by the OpenShell CLI rather than raw `oc`?
+* Where does OpenClaw run in this module, and what does it still lack?
+
+.Answer key
+[%collapsible]
+====
+* The Agent Sandbox controller (the `sandboxes.agents.x-k8s.io` `Sandbox` CRD,
+  installed by the Red Hat Agent Sandbox operator) must exist before the Helm
+  chart can create sandboxes.
+* The raw OpenShell install grants the `privileged` SCC to the
+  `openshell-sandbox`
+  ServiceAccount; sandbox pods receive it, the gateway pod does not.
+* Gateway state is stored in the 1Gi `openshell-data-openshell-0` PVC mounted by
+  the `openshell` StatefulSet (its SQLite database).
+* Gateway registration (`gateway add`, `gateway select`) and the sandbox
+  lifecycle (`sandbox create`, `sandbox get`, `sandbox exec`, `sandbox delete`)
+  run through the OpenShell CLI. Raw `oc` manages cluster resources and the
+  port-forward only.
+* OpenClaw runs inside the `{raw_openclaw_name}` sandbox on the pod boundary
+  (no VM isolation). It has a runtime but no inference provider; model-backed
+  execution arrives in Module 4 behind the SAW gateway.
+====
+
+Proceed to xref:04-module-02-policy-and-security.adoc[Module 2: Policy and Security].

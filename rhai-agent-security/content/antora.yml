@@ -1,0 +1,38 @@
+name: modules
+title: "Securing AI Agents on Red Hat AI"
+version: ~
+nav:
+  - modules/ROOT/nav.adoc
+
+asciidoc:
+  attributes:
+    experimental: true
+    page-pagination: true
+    guid: '%GUID%'
+    ssh_user: 'lab-user'
+    openshift_console_url: '%OPENSHIFT_CONSOLE_URL%'
+    ocp_version: '4.22'
+    automation_repo: 'automation'
+    gitops_namespace: 'openshift-gitops'
+    gitops_root: 'automation/argocd'
+    saw_repo_url: 'https://github.com/taylorjordanNC/secure-agent-workspace.git'
+    saw_repo_branch: 'saw-emulation-fixes'
+    saw_repo_dir: 'secure-agent-workspace'
+    openshell_version: '0.0.103'
+    openshell_sandbox_image: 'ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e'
+    openshell_saw_version: '0.0.103-rhaiv.0'
+    agent_sandbox_channel: 'preview-0.9'
+    openshell_namespace: 'openshell'
+    raw_gateway_name: 'local-gateway'
+    raw_sandbox_name: 'policy-lab'
+    raw_openclaw_name: 'openclaw-lab'
+    raw_openclaw_image: 'ghcr.io/nvidia/openshell-community/sandboxes/openclaw@sha256:c116946b3f9e84791630f21f115ac35c9c9f669af70ec0eef3035d79833a9550'
+    saw_namespace: 'openshell-agents'
+    saw_gitops_namespace: 'vp-gitops'
+    saw_gateway_name: 'openshell-saw'
+    saw_workspace: 'cuda-dev'
+    saw_sandbox: 'cuda-sandbox'
+    guardrails_namespace: 'guardrails'
+    guardrails_name: 'nemo-guardrails'
+    llm_base_url: 'https://maas.apps.ocp.cloud.rhai-tmm.dev/prelude-maas/glm-53-flash/v1'
+    llm_model_name: 'glm-53-flash'

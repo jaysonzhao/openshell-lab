@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Open the OpenClaw web UI via openshell ssh-proxy port-forward.
+# Uses the local openshell CLI with fresh OIDC token — no virtctl needed.
+
+set -euo pipefail
+
+GATEWAY_NAME="${GATEWAY_NAME:?GATEWAY_NAME is required}"
+# SANDBOX_NAME/WORKSPACE are name-sensitive: the fallbacks below resolve to
+# the gateway name and the 'default' workspace, which is the WRONG sandbox if
+# your agent lives elsewhere (e.g. cuda-sandbox in workspace cuda-dev). A
+# tunnel to the wrong sandbox connects but the browser shows
+# ERR_EMPTY_RESPONSE because that sandbox's daemon is not running. Always set
+# SANDBOX_NAME and WORKSPACE explicitly unless your agent IS the default.
+SANDBOX_NAME="${SANDBOX_NAME:-${OPENSHELL_SAW_NAME:-${GATEWAY_NAME}}}"
+WORKSPACE="${WORKSPACE:-default}"
+GUI_PORT="${GUI_PORT:-18789}"
+SSH_USER="${SSH_USER:-sandbox}"
+
+command -v openshell >/dev/null 2>&1 || {
+  echo "Error: openshell CLI not found. Install from https://github.com/NVIDIA/OpenShell/releases"
+  exit 1
+}
+
+# Kill any existing port-forward on this port
+pids=$(lsof -ti :"${GUI_PORT}" 2>/dev/null || true)
+if [[ -n "${pids}" ]]; then
+  kill "${pids}" 2>/dev/null || true
+  sleep 1
+fi
+
+# Fetch dashboard token via openshell sandbox exec
+echo "Fetching dashboard token..."
+TOKEN=$(openshell sandbox exec -n "${SANDBOX_NAME}" --workspace "${WORKSPACE}" --no-tty -- \
+  cat /sandbox/.openclaw/openclaw.json 2>/dev/null \
+  | python3 -c "import sys,json; c=json.load(sys.stdin); print((c.get('gateway',{}).get('auth',{}).get('token','')))" 2>/dev/null | grep -oE '^[a-f0-9]+$' || true)
+
+if [[ -z "${TOKEN}" ]]; then
+  TOKEN=$(openshell sandbox exec -n "${SANDBOX_NAME}" --workspace "${WORKSPACE}" --no-tty -- \
+    cat /tmp/auth-token 2>/dev/null | grep -oE '[a-f0-9]{32,}' || true)
+fi
+
+if [[ -z "${TOKEN}" ]]; then
+  echo "Error: Could not extract dashboard token."
+  echo "  Make sure the sandbox setup has completed and openclaw is configured."
+  echo ""
+  echo "  Try: openshell sandbox list"
+  exit 1
+fi
+
+echo ""
+echo "OpenClaw UI: http://localhost:${GUI_PORT}/#token=${TOKEN}"
+echo "Press Ctrl-C to stop."
+echo ""
+
+# Port-forward via openshell ssh-proxy — uses local OIDC token
+ssh -o "ProxyCommand=openshell ssh-proxy --gateway-name ${GATEWAY_NAME} --name ${SANDBOX_NAME} --workspace ${WORKSPACE}" \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o LogLevel=ERROR \
+  -L "${GUI_PORT}:127.0.0.1:18789" \
+  -N "${SSH_USER}@openshell-${SANDBOX_NAME}.${WORKSPACE}"

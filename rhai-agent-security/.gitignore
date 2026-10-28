@@ -1,0 +1,8 @@
+node_modules/
+www/
+.playwright-mcp/
+evidence/
+automation/fleet/clusters.csv
+automation/fleet/clusters.status
+automation/fleet/install-*.log
+automation/fleet/.workers/

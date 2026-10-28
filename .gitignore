@@ -1,0 +1,14 @@
+# Local credentials and cluster configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+kubeconfig*
+**/kubeconfig*
+
+# Local operating-system files
+.DS_Store

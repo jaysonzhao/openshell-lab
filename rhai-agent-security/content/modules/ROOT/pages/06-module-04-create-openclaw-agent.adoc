@@ -1,0 +1,296 @@
+= Module 4: Validate and Operate Secure Agent Workspace
+:navtitle: Validate and Operate SAW
+
+Modules 1-2 proved each control on a pod boundary. This module moves the same
+agent into the production shape customers deploy: a dedicated VM with identity,
+secrets, and GitOps governance around it. Why a VM: a pod is a process on a
+machine shared with other workloads; a VM is its own machine with its own
+kernel, so a compromised agent has to escape an entire operating system, not
+just a container. The validation flow is also a
+platform admin's day-2 checklist — the same steps to run when you inherit or
+demo an environment.
+
+This is the required entry point for SAW exercises and part of the core track.
+SAW must already be up — installed by you as the Module 3 prework before
+class, or deployed by the facilitator with the fleet install script.
+You will configure OIDC access, validate the deployed resources, inspect failure
+signals, and run OpenClaw through the SAW-managed NemoClaw sandbox.
+
+== Reference architecture mapping
+
+This deployment realizes the reference architectures together, and each workshop
+exercise maps onto one of their components:
+
+[cols="1,2,3",options="header"]
+|===
+| Reference architecture | What it owns | Deployed as
+
+| NVIDIA OpenShell
+| The gateway, sandbox supervisor, and policy engine that create, govern, and
+  observe sandboxes
+| The OpenShell gateway inside the workspace VM, the supervisor in every
+  sandbox, and the OpenShell policy applied to each sandbox
+
+| NVIDIA NemoClaw
+| The agent runtime and packaging model: OpenClaw lifecycle, onboarding,
+  provider wiring, and the policy model
+| The BOM-configured NemoClaw runtime inside the VM; the setup Job provisions
+  OpenClaw sandboxes through the OpenShell gateway at deploy time
+
+| OpenClaw
+| The agent process, tools, workspace, and Control UI
+| Runs inside the sandbox; the NemoClaw runtime drives its lifecycle, and this
+  workshop reaches it through `openclaw tui`
+
+| Secure Agent Workspace
+| VM isolation, identity, secrets, and validated-pattern deployment
+| The KubeVirt workspace VM, Keycloak OIDC, Vault and External Secrets, and the
+  GitOps-managed configuration
+|===
+
+The standalone `nemoclaw onboard` workflow is not used because the runtime's
+lifecycle job is performed at deploy time: the BOM (bill of materials — the
+manifest listing exactly which agent image and components ship) configures the
+NemoClaw runtime in the VM, and its setup Job onboards OpenClaw and wires the
+inference provider through the OpenShell gateway. Module 1 showed OpenClaw running on the
+raw OpenShell pod boundary; this module shows the same agent inside the
+production-shaped VM boundary with the runtime, OIDC, and secrets around it.
+
+== Entry requirements
+
+The facilitator must provide these items for a pre-provisioned environment:
+
+* the SAW checkout on the control node — if the facilitator has not provided
+  it, clone it: `git clone --branch {saw_repo_branch} {saw_repo_url}`;
+* an OIDC account whose subject a platform admin has added to the assigned
+  workspace with `workspace member add` (the setup Job does not grant
+  human-identity membership — see Exercise 1);
+* read access to `{saw_namespace}` and `{saw_gitops_namespace}`;
+* the generated SSH key required by the native configuration target; and
+* a completed setup Job and running VM.
+
+The SAW BOM and setup Job configure the agent image, inference routing,
+Vault-backed credentials, policy profiles, and sandbox lifecycle. Run all
+commands from the SAW checkout root on the control node — the machine
+holding the SAW SSH key and `virtctl`. A RHEL 10 or Fedora bastion is the
+supported control node; a macOS workstation with the same tools also works,
+and Windows participants use the validated WSL2 path. Nothing in this module
+runs inside the workspace VM directly: the RHEL guest is configured only by
+the setup Job over SSH from the cluster. The Keycloak browser login is the
+only environment-independent step.
+
+== Learning objectives
+
+* Configure and authenticate the SAW gateway entry.
+* Verify the VM, setup Job, BOM workspaces, and gateway version.
+* Diagnose an incomplete workspace from Argo CD, Job, VM, and gateway evidence.
+* Run OpenClaw through the SAW NemoClaw path and identify the credential boundary.
+
+== Exercise 1: Configure the client
+
+The SAW gateway runs inside the workspace VM and uses a TLS Route and Keycloak
+OIDC. Configure the local CLI with the native SAW targets:
+
+include::secure-agent-workspace:ROOT:partial$deployment/configure-client.adoc[]
+
+The `make login` step opens the workshop Keycloak `openshell` realm in your
+browser, not your OpenShift login. The realm is seeded with test users; use
+`developer` / `developer` for the standard user path or `admin` / `admin`
+when a step requires the admin role. Self-registration is also enabled on
+the login page. The realm roles embedded in the issued token
+(`realm_access.roles`) are how the gateway identifies you; `make
+openshell-saw-configure-gateway` caches that token for the CLI.
+
+Workspace membership is not automatic for human identities. Logging in gets
+you a token, but the gateway separately checks a per-workspace member list
+before it lets you touch a workspace — and the automated setup only added the
+machine identity, not you. The SAW setup Job
+provisions workspaces and grants membership only to the in-VM
+`openshell-client` service identity, so your OIDC identity starts with no
+membership in `{saw_workspace}` or `default`. The first workspace-scoped CLI
+call fails with `not a member of workspace` and asks for a platform admin to
+add your subject. Note the `Subject:` value from `make whoami`, then grant
+yourself membership with the platform-admin identity:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell gateway select {saw_gateway_name}
+openshell gateway login {saw_gateway_name}
+openshell workspace member add \
+  --workspace {saw_workspace} \
+  --subject SUBJECT --role user
+openshell workspace member add \
+  --workspace default \
+  --subject SUBJECT --role user
+----
+
+Replace SUBJECT with the `Subject:` value from `make whoami`. When
+`gateway login` opens the browser, log in as `admin` / `admin`, run the two
+`member add` commands, then return to the `developer` identity with
+`make login OIDC_FLOW=browser`. In a facilitator-provisioned environment the
+facilitator performs this member add for each participant subject before the
+workshop starts — if the first workspace-scoped CLI call succeeds, your
+subject is already a member and you can skip these commands.
+
+== Exercise 2: Validate the deployed workspace
+
+Confirm the infrastructure state before entering the agent sandbox:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get job/{saw_gateway_name}-setup \
+  vm/{saw_gateway_name} vmi/{saw_gateway_name}
+oc -n {saw_gitops_namespace} get applications.argoproj.io
+----
+
+Expected result: the setup Job is `Complete`, the VMI is `Running`, and the
+owning Argo CD applications are `Synced` and `Healthy`. This is the
+reconciliation chain: GitOps owns the pattern, the pattern owns the Job, and
+the Job configures the VM.
+
+.The jsonpath pass conditions for this exercise
+[%collapsible]
+====
+[source,bash,subs="attributes+"]
+----
+test "$(oc -n {saw_namespace} get job/{saw_gateway_name}-setup \
+  -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')" = "True"
+test "$(oc -n {saw_namespace} get vmi/{saw_gateway_name} \
+  -o jsonpath='{.status.phase}')" = "Running"
+----
+====
+
+GUI view: open the OpenShift Console tab and navigate to Virtualization >
+VirtualMachines in the `{saw_namespace}` project. The workspace VM is the
+production answer to "what does the agent run on?" — a dedicated machine, not
+a pod.
+
+Validate the BOM-created workspaces and sandboxes:
+
+include::secure-agent-workspace:ROOT:partial$deployment/validate.adoc[]
+
+The guest gateway must report `{openshell_saw_version}`, the control-node CLI
+must report `{openshell_version}`, the setup Job must be complete, and the VMI
+must be running. The default workspace must contain `notebook`, `cuda-sandbox`,
+and `toolbox`; `{saw_workspace}` must contain `{saw_sandbox}` and `toolbox`.
+
+== Exercise 3: Diagnose an incomplete deployment
+
+If validation fails, inspect each reconciliation layer before rerunning setup.
+The Argo CD application is the outermost layer — if it is not `Synced`, nothing
+below it can be trusted:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_gitops_namespace} get applications.argoproj.io
+----
+
+The setup Job configures the VM over SSH; a failed Job means the VM exists but
+the runtime inside it was never onboarded:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+oc -n {saw_namespace} get job/{saw_gateway_name}-setup \
+  vm/{saw_gateway_name} vmi/{saw_gateway_name}
+oc -n {saw_namespace} logs job/{saw_gateway_name}-setup --tail=80
+----
+
+The setup Job log names the failing onboarding step; the sandbox list shows
+what the gateway actually provisioned:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell --gateway {saw_gateway_name} sandbox list --workspace {saw_workspace}
+----
+
+Use the first failing layer as the recovery boundary. Do not delete the setup
+Job until the owning Argo CD application is healthy and you know how it will be
+recreated. If the token alone has expired, run
+`openshell gateway login {saw_gateway_name}` instead of reconfiguring the VM.
+
+== Exercise 4: Launch OpenClaw in the NemoClaw sandbox
+
+The SAW setup Job provisions the `nemoclaw` sandbox from the configured BOM. Use
+the Makefile target to connect to it:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+OPENSHELL_SAW_NAME={saw_gateway_name} \
+  SANDBOX_NAME={saw_sandbox} \
+  WORKSPACE={saw_workspace} \
+  make openclaw-tui
+----
+
+The target uses `openshell sandbox exec` to start `openclaw tui` in the selected
+workspace. The agent reaches the virtual `inference.local` route — a name the
+gateway resolves to itself, whatever real model sits behind it; the
+gateway-side provider holds the upstream endpoint and credential. The
+standalone `nemoclaw onboard` workflow is not used.
+
+Expected result: the OpenClaw TUI opens in the terminal, connected to the
+agent inside the sandbox. This is the user surface — type a prompt here and
+the agent works in its permitted workspace.
+
+Confirm the sandbox and its policy from a second terminal at the SAW checkout
+root:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell gateway select {saw_gateway_name}
+----
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell sandbox list --workspace {saw_workspace}
+openshell policy get {saw_sandbox} --workspace {saw_workspace} --full
+----
+
+Expected result: the sandbox is listed in the workspace, and the effective
+policy shows the filesystem and network rules OpenShell enforces around the
+agent while you drive it from the TUI.
+
+The sandbox is managed by OpenShell and provisioned by SAW. Do not create a
+second sandbox with `nemoclaw onboard` or point the standalone NemoClaw CLI at
+the raw OpenShell gateway.
+
+== Exercise 5: Run and verify an agent request
+
+Use the TUI to ask the agent to write a file in its permitted workspace:
+
+[source,text]
+----
+Write a short haiku about Kubernetes to /sandbox/haiku.txt, then read it back.
+----
+
+After the file is created, exit the TUI or use a second terminal to verify it:
+
+[source,bash,role="execute",subs="attributes+"]
+----
+openshell --gateway {saw_gateway_name} sandbox exec \
+  -n {saw_sandbox} --workspace {saw_workspace} -- \
+  sh -c 'test -s /sandbox/haiku.txt && cat /sandbox/haiku.txt'
+----
+
+The reason for using the SAW-managed path is lifecycle control. If the agent
+image, route, policy, or access state changes independently, the operator loses
+a reliable explanation of what was running when an action occurred. Record the
+configured image reference with the exercise evidence. Some BOM references on
+this branch use mutable tags, so do not describe them as immutable or attested
+without separately resolving and pinning their registry digests.
+
+The request path is:
+
+`OpenClaw -> inference.local -> supervisor -> OpenShell gateway in the SAW VM -> provider`.
+
+Read it hop by hop: the agent asks for the model; `inference.local` is the
+stand-in name it dials; the supervisor inside the sandbox hands the request to
+the OpenShell gateway in the VM; the gateway — the only place the real
+endpoint and credential live — forwards it upstream. Each hop is a boundary
+you have already inspected in this module.
+
+The real endpoint and credential remain gateway-side. Verify this boundary from
+the effective provider configuration and sandbox environment before relying on
+it as an operational control.
+
+Proceed to xref:07-module-05-interact-with-agent.adoc[Module 5: Test Agent
+Capabilities and Governance].

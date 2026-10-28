@@ -1,0 +1,18 @@
+# Generated SSH keys for sandbox provisioning
+.generated-ssh-keys/
+
+# Secret values (never commit)
+values-secret.yaml
+.env
+.vscode/
+.DS_Store
+jira/
+docs/jira/
+
+# local documents
+local-docs/
+
+# graphify output
+graphify-out/
+ssh-keys/
+charts/saw-bom/scripts/__pycache__/

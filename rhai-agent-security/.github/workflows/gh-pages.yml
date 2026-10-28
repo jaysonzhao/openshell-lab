@@ -1,0 +1,75 @@
+name: github pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'content/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/validate-docs.sh'
+      - 'site.yml'
+      - '.github/workflows/gh-pages.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'content/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/validate-docs.sh'
+      - 'site.yml'
+      - '.github/workflows/gh-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: setup ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - name: checkout SAW documentation source
+        run: git clone --depth 1 --branch saw-emulation-fixes https://github.com/taylorjordanNC/secure-agent-workspace.git ../secure-agent-workspace
+      - name: validate documentation contract
+        run: bash scripts/validate-docs.sh ../secure-agent-workspace
+      - name: install documentation dependencies
+        run: npm ci
+      - name: override ui bundle for gh-pages
+        run: >-
+          sed -i 's|url: .*ui-bundle.zip|url: https://github.com/rhpds/rhdp_showroom_theme/releases/download/showroom-template/ui-bundle.zip|'
+          site.yml
+      - name: antora generate
+        run: npx antora --fetch --log-failure-level warn site.yml
+      - name: upload pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: www
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: deploy github pages
+      id: deployment
+      uses: actions/deploy-pages@v4

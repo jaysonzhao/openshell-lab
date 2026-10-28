@@ -1,0 +1,125 @@
+= Technical Reference
+:navtitle: Technical Reference
+
+== What each repository contributes
+
+[cols="1,3",options="header"]
+|===
+| Repository | Use it for
+
+| link:https://docs.nvidia.com/openshell/latest/[OpenShell^]
+| OpenShell gateway, Kubernetes/OpenShift Helm deployment, raw sandbox
+  lifecycle, policy engine, CLI, logs, and the canonical L7 policy quickstart.
+
+| link:https://github.com/NVIDIA/NemoClaw[NemoClaw^]
+| The OpenClaw reference runtime and policy model. Its standalone onboarding is
+  a local container workflow; the cluster workshop uses the BOM-configured
+  NemoClaw runtime integrated into Secure Agent Workspace.
+
+| link:https://github.com/rh-aiservices-bu/agent-harness-in-a-box[agent-harness-in-a-box^]
+| Context reference for raw OpenShift evaluation deployment, gateway access,
+  raw OpenShell SCC behavior, and basic sandbox exercises.
+
+| link:https://github.com/mamurak/nemoclaw-openshift-launchable[nemoclaw-openshift-launchable^]
+| Context reference for OpenClaw interaction, configuration, UI forwarding,
+  observability, fleet, and incident exercises. Its pinned gateway and Agent
+  Sandbox versions are not the compatibility baseline for this workshop.
+
+| link:https://github.com/validatedpatterns-sandbox/secure-agent-workspace[secure-agent-workspace (upstream)^]
+| The upstream Validated Patterns repository for Secure Agent Workspace. The
+  workshop fork below branches from it; use it for the pattern itself, its
+  releases, and upstream changes and issues.
+
+| link:https://github.com/taylorjordanNC/secure-agent-workspace[secure-agent-workspace^]
+| Source of truth for the cluster NemoClaw/OpenClaw path: KubeVirt VM isolation,
+  OpenShell guest gateway, Keycloak OIDC, Vault/ESO, governance interceptor,
+  policy profiles, Validated Patterns/ArgoCD, and the canonical
+  xref:secure-agent-workspace:ROOT:deployment-guide.adoc[deployment guide].
+
+| link:https://github.com/taylorjordanNC/rhai-agent-security[rhai-agent-security^]
+| The tested workshop sequence, raw OpenShell sandbox environment automation,
+  SAW integration
+  instructions, policy exercises, and evidence checkpoints.
+|===
+
+== Evidence interpretation
+
+[cols="1,2,2",options="header"]
+|===
+| Topic | Supported interpretation | Required evidence
+
+| Sandbox policy
+| The declared filesystem, process, and egress policy is enforced by the
+  OpenShell supervisor and visible through CLI inspection and audit.
+| Exact behavior can vary by OpenShell version and image.
+
+| Provider access
+| SAW governance validates approved provider profiles and fails closed for its
+  configured interceptor bindings when the interceptor is unavailable.
+| Do not infer that every profile rule is live HTTP method enforcement without
+  testing the target version.
+
+| Network isolation
+| OpenShell supports deny-by-default egress, binary binding, and L7 method
+  controls; the SAW integration adds Git-managed governance profiles.
+| Test the specific host, binary, route, and policy version in the target lab.
+
+| NemoClaw on OpenShift
+| SAW integrates a BOM-configured NemoClaw runtime inside a per-user VM on OpenShift.
+| Do not claim that standalone `nemoclaw onboard` manages a remote OpenShift
+  gateway; verify the deployed SAW image, gateway, and BOM versions.
+
+| VM isolation
+| This workshop SAW profile provisions a dedicated KubeVirt VM for its
+  configured owner.
+| Confirm the VM owner configuration, namespace mode, and VMI state. Do not
+  infer automated multi-user provisioning from one deployed release.
+
+| Human approval
+| The capstone incident flow requires a UI confirmation before its fixed
+  remediation action.
+| Do not describe that confirmation as durable, identity-bound approval evidence
+  unless the environment records and retains such an event.
+|===
+
+== Model-boundary extension
+
+NVIDIA NeMo Guardrails adds guardrails at the application or model boundary.
+It complements OpenShell; it does not replace the sandbox. OpenShell limits
+what the agent can execute, while application-level guardrails limit what the
+model receives or returns.
+
+Module 8 installs and exercises this integration:
+xref:13-module-08-model-boundary-guardrails.adoc[Module 8: Model-Boundary
+Guardrails] deploys the guardrails server with the TrustyAI operator, tests
+rails through the OpenAI-compatible API, probes rails in isolation, and wires
+a client application. The `nemo-guardrails` chart lives in
+`automation/charts/nemo-guardrails`. The guardrails boundary is not part of
+the OpenShell sandbox claims above; its pass conditions are stated in Module
+8 and verified there.
+
+== Workshop evidence bundle
+
+Retain these artifacts when recording workshop results:
+
+* The effective sandbox policy and a sample audit event.
+* The architecture diagram identifying the OpenShift cluster, raw OpenShell
+  sandbox environment,
+  SAW VM, OpenClaw/NemoClaw,
+  Keycloak, Vault, and the governance interceptor.
+* A capability matrix mapping each agent to its allowed backends.
+* The deployed boundary: raw pod-based evaluation or the configured-owner SAW VM.
+* A validation plan covering identity, secrets, policy enforcement, audit,
+  observability, and human approval.
+
+== Further reading
+
+* link:https://docs.nvidia.com/openshell/latest/[NVIDIA OpenShell documentation^]
+* link:https://github.com/NVIDIA/NemoClaw[NVIDIA NemoClaw^]
+* link:https://docs.nvidia.com/enterprise-reference-architectures/secure-agent-workspace-reference-design/latest/[Secure Agent Workspace reference design^]
+* link:https://validatedpatterns.io/[Red Hat Validated Patterns^]
+* link:https://docs.openshift.com/container-platform/latest/virt/about-virt.html[OpenShift Virtualization^]
+
+The workshop is complete when participants can operate the environment,
+distinguish desired policy from runtime evidence, diagnose a failed layer, and
+state which controls were and were not verified.

@@ -1,0 +1,32 @@
+---
+site:
+  title: "Securing AI Agents on Red Hat AI"
+  url: https://taylorjordannc.github.io/rhai-agent-security
+  start_page: modules::index.adoc
+
+content:
+  sources:
+    - url: .
+      start_path: content
+    - url: https://github.com/taylorjordanNC/secure-agent-workspace.git
+      branches: saw-emulation-fixes
+      start_path: docs/antora
+
+ui:
+  bundle:
+    url: https://github.com/rhpds/rhdp_showroom_theme/releases/download/v2.0.3/ui-bundle.zip
+    snapshot: true
+
+antora:
+  extensions:
+    - require: '@sntke/antora-mermaid-extension'
+      mermaid_library_url: https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs
+      script_stem: header-scripts
+      mermaid_initialize_options:
+        start_on_load: true
+        flowchart:
+          use_max_width: false
+    - require: '@andrew-jones/antora-tabs-extension'
+
+output:
+  dir: ./www

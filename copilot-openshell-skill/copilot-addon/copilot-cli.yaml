@@ -1,0 +1,52 @@
+id: copilot-cli
+display_name: GitHub Copilot CLI add-on
+description: Copilot service and narrowly scoped GitHub authentication
+category: agent
+credentials:
+- name: api_token
+  description: Personal account Copilot Requests token
+  env_vars:
+  - COPILOT_GITHUB_TOKEN
+  required: true
+  auth_style: bearer
+  header_name: authorization
+discovery:
+  credentials:
+  - api_token
+endpoints:
+- host: api.individual.githubcopilot.com
+  port: 443
+  protocol: rest
+  tls: terminate
+  access: read-write
+  enforcement: enforce
+- host: api.github.com
+  port: 443
+  path: /user
+  protocol: rest
+  tls: terminate
+  enforcement: enforce
+  rules:
+  - allow:
+      method: GET
+      path: /user
+- host: api.github.com
+  port: 443
+  path: /copilot_internal/**
+  protocol: rest
+  tls: terminate
+  enforcement: enforce
+  rules:
+  - allow:
+      method: GET
+      path: /copilot_internal/**
+- host: api.githubcopilot.com
+  port: 443
+  protocol: rest
+  tls: terminate
+  access: read-write
+  enforcement: enforce
+binaries:
+- /usr/bin/copilot
+- /usr/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot
+resource_version: 1

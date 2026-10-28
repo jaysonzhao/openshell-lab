@@ -1,0 +1,129 @@
+= Facilitator Guide
+:navtitle: Facilitator Guide
+
+For facilitators provisioning workshop environments ahead of class.
+Participants can skip this page.
+
+Division of labor: the gitops path deploys the workshop
+prerequisites; the fleet scripts install SAW per
+cluster; participants run xref:05-module-03-deploy-secure-agent-workspace.adoc[Module 3]
+only when self-deploying. The fleet scripts loop that module's documented
+procedure and never duplicate fork logic.
+
+Do not provision SAW ahead of time when the class is meant to run the
+lengthy manual setup: deploying SAW with the fleet script removes
+xref:05-module-03-deploy-secure-agent-workspace.adoc[Module 3] from the
+extended track, because that module is the documented manual install.
+Setup the clusters with the fleet automation scripts only when participants should skip those steps.
+
+== Provision the clusters
+
+One-time shared assets, reused for every cluster:
+
+[source,bash,subs="attributes+"]
+----
+mkdir -p ~/git && git clone --branch {saw_repo_branch} \
+  {saw_repo_url} ~/git/{saw_repo_dir}
+cp ~/git/{saw_repo_dir}/values-secret.yaml.template ~/values-secret.yaml
+cd ~/git/{saw_repo_dir} && make generate-keys
+----
+
+[IMPORTANT]
+====
+One shared inference key covers every cluster and every participant. Edit
+`~/values-secret.yaml` once: set `provider: build` and an
+link:https://docs.nvidia.com/ngc/gpu-cloud/ngc-user-guide/index.html#generating-api-key[NVIDIA NGC API key^]
+for the default `nvidia/nemotron-3-super-120b-a12b` model, with the key in a
+readable file (for example `~/.ngc-api-key`). The fleet install loads it into
+each cluster's Vault; the gateway-side provider holds it and participants
+never see it — no participant step prompts for a model key on the SAW track.
+Check the key's quota: one key serves every agent turn across all clusters,
+though consumption is modest. Module 8 needs no facilitator key —
+participants obtain their own Model-as-a-Service key and enter it at install
+time.
+====
+
+OpenShift-GitOps / ArgoCD must be enabled in the OpenShift cluster. On RHDP
+orders the order's gitops path deploys the workshop chart
+(`{automation_repo}/argocd`), whose template creates the `module-7-prereqs`
+child directly. On a cluster without the order pointer, apply the child once:
+
+[source,bash,subs="attributes+"]
+----
+make -C {automation_repo} capstone-bootstrap
+----
+
+[CAUTION]
+====
+Skip the fleet install below when participants must go through the manual
+SAW setup themselves: a fleet-provisioned environment means Module 3 is
+already done, and the class loses that manual experience.
+====
+
+Fill `clusters.csv` from the RHDP orders (gitignored — never commit it) —
+even for a single cluster: one row is the only credential source, and
+`fleet-status.sh` reads the same file:
+
+[source,bash,subs="attributes+"]
+----
+cp {automation_repo}/fleet/clusters.csv.example {automation_repo}/fleet/clusters.csv
+----
+
+Bootstrap one cluster by name — installs and blocks until `module-7-prereqs`
+is Synced/Healthy, so participants may proceed the moment it returns
+(~50-70 min). No `--jobs` needed:
+
+[source,bash,subs="attributes+"]
+----
+./{automation_repo}/fleet/fleet-install.sh --only workshop-01
+----
+
+For a large order, fan out across the fleet:
+
+[source,bash,subs="attributes+"]
+----
+./{automation_repo}/fleet/fleet-install.sh --jobs 5
+----
+
+Timing: ~50-70 min per cluster (the pattern GitOps
+health loop ~30-50 min); VM setup continues in-cluster for ~1-3h after the
+install returns. 50 clusters: 5 workers ≈ 10h, 10 workers ≈ 5h. Knobs:
+`--wait` blocks per cluster until the setup Job completes, `--dry-run` prints
+the plan, `--no-emulation` for KVM-capable clusters only.
+
+Before `--jobs > 1`: commit and push local fork changes to
+{saw_repo_branch} — worker clones come from the fork, so uncommitted fixes
+are missing from them.
+
+== Verify every cluster
+
+[source,bash]
+----
+./{automation_repo}/fleet/fleet-status.sh
+----
+
+Shows Argo CD Application sync/health, the SAW VM phase, the setup Job, and
+the workshop namespaces per cluster. Any cluster whose Applications are not
+Healthy or whose VM is not Running needs attention before class; use the
+installation diagnostics in xref:05-module-03-deploy-secure-agent-workspace.adoc[Module 3].
+
+For a single cluster, poll just the current `oc` context with
+`fleet-status.sh --current`. Before participants arrive, gate the whole
+fleet — it exits non-zero if any cluster is not ready:
+
+[source,bash]
+----
+./{automation_repo}/fleet/fleet-status.sh --gate
+----
+
+== Day of class
+
+* Both checkouts and participant tooling are ready per
+  xref:02-details.adoc[Prerequisites and Environment].
+* With SAW provisioned ahead of time, participants skip Module 3 and start at
+  xref:03-module-01-basic-openshell.adoc[Module 1], or jump straight to the
+  xref:09-module-07-sre-capstone.adoc[capstone].
+* When the class runs the manual setup instead, participants install SAW as
+  the Module 3 prework before class and the extended-track total grows by
+  90-150 min.
+* Console URLs come from the RHDP orders.
