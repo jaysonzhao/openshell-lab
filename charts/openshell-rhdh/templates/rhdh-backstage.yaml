@@ -51,23 +51,79 @@ spec:
       {{- if .Values.rhdh.host }}
       host: {{ .Values.rhdh.host }}
       {{- end }}
-  {{- if not .Values.tls.insecureSkipVerify }}
-  # The CA bundle NODE_EXTRA_CA_CERTS names, written before RHDH starts.
   deployment:
     patch:
       spec:
         template:
           spec:
             initContainers:
+              - name: install-dynamic-plugins
+                resources:
+                  requests:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageRequest | quote }}
+                  limits:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageLimit | quote }}
+              - name: init-rag-data
+                command:
+                  - sh
+                  - -c
+                  - |
+                    if [ ! -d /data/embeddings_model ]; then
+                      echo 'Seeding RAG data...'
+                      cp -r --no-preserve=mode,ownership /rag/. /data/
+                    fi
+                    mkdir -p /data/vector_db/notebooks
+                    chmod -R a+rwX /data/embeddings_model /data/vector_db
+              {{- if not .Values.tls.insecureSkipVerify }}
+              # Build the CA bundle before RHDH starts.
               {{- include "openshell-rhdh.caInitContainer" . | nindent 14 }}
+              {{- end }}
             containers:
               - name: backstage-backend
+                resources:
+                  requests:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageRequest | quote }}
+                  limits:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageLimit | quote }}
+                {{- if not .Values.tls.insecureSkipVerify }}
                 volumeMounts:
                   - name: saw-ca
                     mountPath: /opt/saw-ca
                     readOnly: true
+                {{- end }}
+              - name: lightspeed-core
+                resources:
+                  requests:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageRequest | quote }}
+                  limits:
+                    ephemeral-storage: {{ .Values.rhdh.persistence.ephemeralStorageLimit | quote }}
             volumes:
+              - $patch: replace
+                name: extensions-catalog
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-extensions-catalog" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              - $patch: replace
+                name: npmcacache
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-npmcacache" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              - $patch: replace
+                name: temp
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-temp" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              - $patch: replace
+                name: shared-storage
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-shared-storage" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              - $patch: replace
+                name: rag-data-volume
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-rag-data-volume" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              - $patch: replace
+                name: saw-ca
+                persistentVolumeClaim:
+                  claimName: {{ printf "%s-saw-ca" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
+              {{- if not .Values.tls.insecureSkipVerify }}
               {{- include "openshell-rhdh.caVolumes" . | nindent 14 }}
-  {{- end }}
+              {{- end }}
   database:
     enableLocalDb: true

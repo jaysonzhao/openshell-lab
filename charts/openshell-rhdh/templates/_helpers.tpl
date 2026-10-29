@@ -65,8 +65,6 @@ Each pod mounts saw-ca at /opt/saw-ca and reads /opt/saw-ca/ca-bundle.crt. */ -}
 {{- end -}}
 
 {{- define "openshell-rhdh.caVolumes" -}}
-- name: saw-ca
-  emptyDir: {}
 - name: saw-ca-sources
   configMap:
     name: saw-ca-sources
