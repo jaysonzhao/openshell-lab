@@ -2,6 +2,7 @@
 # Each entry creates saw-<name>. Demo entries are in saw-users-demo.yaml.
 users:
   - name: alice
+    pruneOnRemove: true
     profiles:
       - custom-inference
     vaultPrefix: secret/data/hub/saw-alice
