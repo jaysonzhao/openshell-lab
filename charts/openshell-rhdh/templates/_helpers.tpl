@@ -64,7 +64,7 @@ Each pod mounts saw-ca at /opt/saw-ca and reads /opt/saw-ca/ca-bundle.crt. */ -}
     seccompProfile: { type: RuntimeDefault }
 {{- end -}}
 
-{{- define "openshell-rhdh.caVolumes" -}}
+{{- define "openshell-rhdh.caSupportVolumes" -}}
 - name: saw-ca-sources
   configMap:
     name: saw-ca-sources
@@ -89,6 +89,12 @@ Each pod mounts saw-ca at /opt/saw-ca and reads /opt/saw-ca/ca-bundle.crt. */ -}
           name: openshift-service-ca.crt
           items: [{key: service-ca.crt, path: service-ca.crt}]
           optional: true
+{{- end -}}
+
+{{- define "openshell-rhdh.caVolumes" -}}
+- name: saw-ca
+  emptyDir: {}
+{{ include "openshell-rhdh.caSupportVolumes" . }}
 {{- end -}}
 
 {{- define "openshell-rhdh.caNamespaces" -}}

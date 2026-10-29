@@ -123,7 +123,7 @@ spec:
                 persistentVolumeClaim:
                   claimName: {{ printf "%s-saw-ca" .Values.rhdh.name | trunc 63 | trimSuffix "-" }}
               {{- if not .Values.tls.insecureSkipVerify }}
-              {{- include "openshell-rhdh.caVolumes" . | nindent 14 }}
+              {{- include "openshell-rhdh.caSupportVolumes" . | nindent 14 }}
               {{- end }}
   database:
     enableLocalDb: true
