@@ -19,6 +19,22 @@ rhdh:
   # cluster's API versions are not known (helm template without a cluster).
   apiVersion: ""
   host: ""
+  # The RHDH operator's cache, scratch, portal, and RAG directories use
+  # dedicated PVCs. Keep claims when this chart is removed so portal data is
+  # not deleted by GitOps pruning.
+  persistence:
+    storageClassName: "" # Empty uses the cluster default StorageClass.
+    sizes:
+      extensionsCatalog: 1Gi
+      npmCache: 1Gi
+      temp: 5Gi
+      sharedStorage: 1Gi
+      ragData: 2Gi
+      caBundle: 1Gi
+    # PVC-backed paths no longer consume local ephemeral space. Keep a small
+    # allowance for container writable layers and logs.
+    ephemeralStorageRequest: 1Gi
+    ephemeralStorageLimit: 2Gi
   catalogProcessingSeconds: 30
   # Backstage RBAC. Off: every signed-in realm user may use the templates and
   # read the catalog. What a request may do is enforced by the pipeline, which

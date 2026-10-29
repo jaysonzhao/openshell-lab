@@ -1,0 +1,31 @@
+{{- $root := . -}}
+{{- $claims := list
+  (dict "name" "extensions-catalog" "size" .Values.rhdh.persistence.sizes.extensionsCatalog)
+  (dict "name" "npmcacache" "size" .Values.rhdh.persistence.sizes.npmCache)
+  (dict "name" "temp" "size" .Values.rhdh.persistence.sizes.temp)
+  (dict "name" "shared-storage" "size" .Values.rhdh.persistence.sizes.sharedStorage)
+  (dict "name" "rag-data-volume" "size" .Values.rhdh.persistence.sizes.ragData)
+  (dict "name" "saw-ca" "size" .Values.rhdh.persistence.sizes.caBundle)
+-}}
+{{- range $claim := $claims }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-%s" $root.Values.rhdh.name $claim.name | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $root.Values.rhdh.namespace }}
+  labels:
+    {{- include "openshell-rhdh.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $claim.size | quote }}
+  {{- with $root.Values.rhdh.persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+---
+{{- end }}
