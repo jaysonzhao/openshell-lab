@@ -51,7 +51,7 @@ build:
   fedoraCloudAarch64: "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2"
   memoryLimit: "4Gi"
   # Reserve enough temporary space for the expanded guest and qcow2 conversion.
-  ephemeralStorageRequest: "14Gi"
+  ephemeralStorageRequest: "8Gi"
   ephemeralStorageLimit: "14Gi"
 
 output:
