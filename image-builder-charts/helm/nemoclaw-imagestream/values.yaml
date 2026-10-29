@@ -14,7 +14,7 @@ build:
   # make sandbox-build detects homogeneous clusters or accepts BUILD_ARCH.
   targetArch: ""
   # NemoClaw v0.0.133 base image (multi-arch: amd64 and arm64).
-  baseImage: "ghcr.io/nvidia/nemoclaw/sandbox-base:v0.0.133"
+  baseImage: "ghcr.io/nvidia/nemoclaw/sandbox-base@sha256:6dd56f1607f5d29d35731191052b6a317cff5fc2659f71b35695a76e0f36dc6a"
   model: "claude-sonnet-4-6"
   inferenceBaseUrl: "https://inference.local/v1"
   inferenceApi: "openai-completions"

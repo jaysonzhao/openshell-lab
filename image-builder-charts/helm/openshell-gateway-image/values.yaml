@@ -7,8 +7,8 @@ openshell:
   # Informational: the in-VM installer installs OpenShell from the SAW's
   # InstallerBOM (charts/openshell-saw values `bom:`), not from these.
   version: "0.1.2"
-  gatewayImage: "quay.io/opendatahub/odh-openshell-gateway:v0.1.2-rhaiv.6"
-  supervisorImage: "quay.io/opendatahub/odh-openshell-supervisor:v0.1.2-rhaiv.6"
+  gatewayImage: "quay.io/opendatahub/odh-openshell-gateway@sha256:7bd1357f8b4c293ea6527dee2035e26dcca02fb9a87fb1521a0cd9255ec7d9fc"
+  supervisorImage: "quay.io/opendatahub/odh-openshell-supervisor@sha256:f2178e5ef0948c145b7cc3a7ab3b3238aaf36d2c13a2826aae39b601e987bd7b"
   pipIndexUrl: "https://packages.redhat.com/api/pypi/public-rhai/rhoai/3.6-EA1/cpu-ubi9-test/simple/"
 
 # Pinned cosign used only to verify the installer bundle. The OpenShell
@@ -42,13 +42,17 @@ signing:
   floor: ""
 
 build:
-  builderImage: "registry.fedoraproject.org/fedora:44"
+  runtimeImage: "registry.access.redhat.com/ubi9-micro@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6"
+  builderImage: "registry.fedoraproject.org/fedora@sha256:a329903517f5dbd709721cba0cb1b6d0cc05f01b9e5feb59c2b6bbe9eb083ade"
   # The build runs on a node of the cluster's architecture and picks its
   # base image by `uname -m`: an arm64 cluster builds an aarch64 VM image
   # (KubeVirt runs only guests of the host's architecture).
   fedoraCloud: "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
   fedoraCloudAarch64: "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2"
   memoryLimit: "4Gi"
+  # Reserve enough temporary space for the expanded guest and qcow2 conversion.
+  ephemeralStorageRequest: "14Gi"
+  ephemeralStorageLimit: "14Gi"
 
 output:
   imageStreamTag: "openshell-gateway:latest"

@@ -104,7 +104,7 @@ bom:
     # data-science profile has one). Remove it if no profile needs it.
     # A tag is accepted here with a warning; pin a digest when one exists.
     nemoclaw:
-      cliImage: ghcr.io/validatedpatterns-sandbox/nemoclaw-cli:latest
+      cliImage: ghcr.io/validatedpatterns-sandbox/nemoclaw-cli@sha256:3283cf580e8187a53371c5cabc0557abf9845066a871cbd6596a500a9bcd04a0
 
 # OpenShell gateway runtime configuration inside the VM.
 openshell:
@@ -276,8 +276,8 @@ sandboxUiProxy:
 # Needs oidc.issuerUrl (or global.clusterDomain) and a known webui host.
 dashboard:
   enabled: true
-  image: "quay.io/gkrumbach07/openshell-dashboard:latest"
-  proxyImage: "quay.io/oauth2-proxy/oauth2-proxy:v7.9.0"
+  image: "quay.io/gkrumbach07/openshell-dashboard@sha256:f946a634a4caa2dc4c5fc116425cd5f6b88ff689678b18a9527e1317237783c2"
+  proxyImage: "quay.io/oauth2-proxy/oauth2-proxy@sha256:37c1570c0427e02fc7c947ef2c04e8995b8347b7abc9fcf1dbb4e376a4b221a7"
   clientId: "openshell-dashboard"
   # The dashboard and sandbox-UI oauth2-proxies verify the issuer: with the
   # issuer CA (oidc.caBundle / oidc.clusterCaSecret) when one is configured,
@@ -345,7 +345,7 @@ cleanupOnDelete: true
 
 # The pre-delete cleanup pod (cleanupOnDelete). There is no prepare Job.
 job:
-  image: "registry.fedoraproject.org/fedora:44"
+  image: "registry.fedoraproject.org/fedora@sha256:a329903517f5dbd709721cba0cb1b6d0cc05f01b9e5feb59c2b6bbe9eb083ade"
 
 # Each SAW is installed into its own namespace (the release namespace), e.g.
 # saw-<name>. Label that namespace openshell.pattern/saw=true so the shared

@@ -20,7 +20,7 @@ engine: interceptor
 # tagged with the OpenShell ref it is built from (image-builder-charts/helm/
 # governance-interceptor-image/values.yaml source.git.ref). It must match the
 # SAW gateways' OpenShell release.
-image: "ghcr.io/validatedpatterns-sandbox/governance-interceptor:v0.1.2"
+image: "ghcr.io/validatedpatterns-sandbox/governance-interceptor@sha256:253b58d070d3ed341287fcbab44684d84a437fcb9f26be5834ebf554a40ec22f"
 # gRPC listen port
 port: 18081
 # Provider profiles a deployment adds to the shipped catalog: a ConfigMap of

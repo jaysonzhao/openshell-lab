@@ -6,8 +6,8 @@ source:
 build:
   contextDir: "examples/governance-interceptor"
   # OpenShell 0.1.x needs Rust 1.94 (rust-version in its Cargo.toml).
-  builderImage: "rust:1.94-bookworm"
-  runtimeImage: "registry.access.redhat.com/ubi9-micro:latest"
+  builderImage: "rust@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55"
+  runtimeImage: "registry.access.redhat.com/ubi9-micro@sha256:5be877a2a280ae36eb9ab80ca4efb28bbf77c57abbba38137cdc37a03b8465e6"
   # Shared Dockerfile stage with Debian and its CA certificates installed.
   ghcrRuntimeImage: "debian-runtime"
 

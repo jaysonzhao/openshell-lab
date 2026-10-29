@@ -1,3 +1,33 @@
 # Add real account names here after creating them with keycloak-add-users.
 # Each entry creates saw-<name>. Demo entries are in saw-users-demo.yaml.
-users: []
+users:
+  - name: alice
+    profiles:
+      - custom-inference
+    vaultPrefix: secret/data/hub/saw-alice
+  - name: bob
+    profiles:
+      - custom-inference
+    vaultPrefix: secret/data/hub/saw-bob
+
+ownerResolution:
+  resolverNamespace: keycloak
+
+defaults:
+  openshellSaw:
+    oidc:
+      keycloakNamespace: keycloak
+    networkPolicy:
+      enabled: true
+      clusterNetworkCIDRs:
+        - 10.232.0.0/14
+      serviceNetworkCIDRs:
+        - 172.231.0.0/16
+    egress:
+      extraAllow:
+        - api.minimax.io
+    cleanupApi:
+      serviceIP: 172.231.0.1
+      endpoints:
+        - ip: 10.10.10.10
+          port: 6443

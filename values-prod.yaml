@@ -5,19 +5,10 @@ clusterGroup:
     external-secrets-operator:
       operatorGroup: true
       targetNamespaces: []
-    openshift-cnv:
-      operatorGroup: true
-      targetNamespaces:
-        - openshift-cnv
     # Shared: golden image, image builds, governance interceptor.
     openshell-agents:
-    # Keycloak and its RHBK operator, in a namespace of their own so they
-    # never collide with a platform Keycloak (often in `keycloak`). Any
-    # namespace works; see openshell-saw oidc.keycloakNamespace.
-    saw-keycloak:
-      operatorGroup: true
-      targetNamespaces:
-        - saw-keycloak
+    # Reuse the preinstalled single-namespace RHBK operator in `keycloak`.
+    # SAW gets a separate Keycloak CR and database there.
     rhdh-operator:
       operatorGroup: true
       targetNamespaces: []
@@ -34,14 +25,6 @@ clusterGroup:
       name: openshift-external-secrets-operator
       namespace: external-secrets-operator
       channel: stable-v1
-    openshift-virtualization:
-      name: kubevirt-hyperconverged
-      namespace: openshift-cnv
-      channel: stable
-    rhbk:
-      name: rhbk-operator
-      namespace: saw-keycloak
-      channel: stable-v26
     rhdh:
       name: rhdh
       namespace: rhdh-operator
@@ -66,16 +49,15 @@ clusterGroup:
       namespace: vault
       chart: hashicorp-vault
       chartVersion: 0.1.*
-    openshift-cnv:
-      name: openshift-cnv
-      namespace: openshift-cnv
-      path: charts/openshift-cnv
     openshell-keycloak:
       name: openshell-keycloak
-      namespace: saw-keycloak
+      namespace: keycloak
       path: charts/openshell-keycloak
-      # Import passwords from Vault only when users are explicitly selected.
+      # Reuse the existing RHBK operator, keep DB credentials in Vault/ESO,
+      # and import no users until a real account is selected.
       overrides:
+        - name: postgres.externalSecret.enabled
+          value: "true"
         - name: keycloak.userPasswords.externalSecret.enabled
           value: "true"
         - name: ownerResolver.enabled
@@ -113,6 +95,9 @@ clusterGroup:
       name: openshell-rhdh
       namespace: rhdh
       path: charts/openshell-rhdh
+      overrides:
+        - name: keycloak.namespace
+          value: keycloak
     governance-policy:
       name: governance-policy
       namespace: openshell-agents

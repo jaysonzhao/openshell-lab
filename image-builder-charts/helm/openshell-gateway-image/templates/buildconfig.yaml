@@ -273,7 +273,7 @@ spec:
           qemu-img convert -c -O qcow2 base.qcow2 /output/disk.qcow2 && \
           rm -f base.qcow2
 
-      FROM registry.access.redhat.com/ubi9-micro:latest
+      FROM {{ .Values.build.runtimeImage }}
       COPY --from=builder /output/disk.qcow2 /disk/disk.qcow2
   strategy:
     type: Docker
@@ -284,6 +284,9 @@ spec:
       kind: ImageStreamTag
       name: {{ $imageName }}:latest
   resources:
+    requests:
+      ephemeral-storage: {{ .Values.build.ephemeralStorageRequest | quote }}
     limits:
+      ephemeral-storage: {{ .Values.build.ephemeralStorageLimit | quote }}
       memory: {{ .Values.build.memoryLimit }}
   triggers: []

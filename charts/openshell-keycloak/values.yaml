@@ -1,9 +1,15 @@
 postgres:
-  image: "registry.redhat.io/rhel9/postgresql-16:latest"
+  image: "registry.redhat.io/rhel9/postgresql-16@sha256:9223bb5f0745e66f0e4204ff87d4d1a5283f3726e9b7d9b71d7bdb2a650fc218"
   storage: 1Gi
   database: keycloak
   username: keycloak
-  password: keycloak-db-pass
+  password: ""
+  externalSecret:
+    enabled: false
+    vaultKey: secret/data/hub/saw-keycloak-db
+    secretStoreRef:
+      name: vault-backend
+      kind: ClusterSecretStore
 
 keycloak:
   name: openshell-keycloak
@@ -126,7 +132,7 @@ demo:
 # master admin. Same rules as scripts/keycloak-redirects.py sync.
 redirectRegistrar:
   enabled: true
-  image: registry.access.redhat.com/ubi9/python-311:latest
+  image: registry.access.redhat.com/ubi9/python-311@sha256:a0bdb55576fc5b8d6704279307817828ef027e1065533ceba133fe9516003a6c
   clientId: saw-redirect-registrar
   # Empty: http://<keycloak>-service.<namespace>.svc:8080 (in-cluster).
   keycloakUrl: ""
@@ -144,7 +150,7 @@ redirectRegistrar:
 ownerResolver:
   enabled: false
   name: saw-owner-resolver
-  image: registry.access.redhat.com/ubi9/python-311:latest
+  image: registry.access.redhat.com/ubi9/python-311@sha256:a0bdb55576fc5b8d6704279307817828ef027e1065533ceba133fe9516003a6c
   clientId: saw-owner-resolver
   keycloakUrl: ""
   adminSecret: ""

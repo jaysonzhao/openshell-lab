@@ -5,7 +5,7 @@ source:
 
 build:
   nemoclawVersion: "0.0.133"
-  nodeImage: "node:22-trixie-slim"
+  nodeImage: "node@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f"
   # NemoClaw v0.0.133 does not support OpenShell 0.1.x; the SAW installer falls
   # back to a plain sandbox with OpenClaw when `nemoclaw onboard` fails.
   maxOpenshellVersion: "0.0.116"
