@@ -26,6 +26,11 @@ defaults:
     egress:
       extraAllow:
         - api.minimax.io
+    source:
+      dataSource: openshell-gateway
+      dataSourceNamespace: openshell-agents
+    credentialProxy:
+      image: image-registry.openshift-image-registry.svc:5000/openshell-agents/saw-credential-proxy@sha256:cc4fb0ba0a828869ec4b954083f32d1ae425d3f62a2e2c255b00925513d41d54
     cleanupApi:
       serviceIP: 172.231.0.1
       endpoints:
