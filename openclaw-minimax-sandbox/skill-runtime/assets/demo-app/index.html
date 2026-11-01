@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent security lab</title>
+<style>
+:root{font-family:system-ui,sans-serif;color:#151515;background:#f5f5f5;line-height:1.5}*{box-sizing:border-box}body{margin:0}header{background:#151515;color:#fff;padding:20px max(24px,calc((100vw - 1120px)/2));border-bottom:5px solid #e00}header strong{font-size:20px}header span{float:right;font-size:13px;color:#ddd}main{max-width:1168px;margin:auto;padding:38px 24px}h1{font-size:40px;line-height:1.15;margin:8px 0 14px;letter-spacing:-1px}h2{font-size:20px;margin:0 0 12px}p{color:#555;margin:8px 0 18px}.eyebrow{text-transform:uppercase;font-size:12px;letter-spacing:2px;color:#b30000;font-weight:700}.layers{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:26px 0}.card,.work{background:white;border:1px solid #ddd;border-radius:6px;padding:22px}.card b{display:block;margin-bottom:8px}.card p{font-size:14px;margin:0}.badge{font-size:12px;background:#eee;padding:5px 10px;border-radius:20px;display:inline-block;margin:6px 0 14px}.layout{display:grid;grid-template-columns:1fr 1fr;gap:20px}textarea{width:100%;min-height:140px;resize:vertical;border:1px solid #777;border-radius:3px;padding:12px;font:inherit}button{cursor:pointer;font:inherit;border:1px solid #666;padding:9px 15px;background:white;border-radius:3px}button.primary{background:#c00;border-color:#c00;color:white}button:disabled{opacity:.5;cursor:wait}.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.examples{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.examples button{font-size:12px;padding:6px 10px}.output{min-height:180px;background:#fafafa;border-left:3px solid #b8b8b8;padding:16px;white-space:pre-wrap;overflow-wrap:anywhere}pre{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:300px;overflow:auto}#status{font-weight:600;font-size:14px;margin:12px 0}.note{font-size:13px;margin:22px 0 0;color:#555}a{color:#06c}footer{margin:26px 0;font-size:12px;color:#666}@media(max-width:750px){.layers,.layout{grid-template-columns:1fr}h1{font-size:32px}header span{float:none;display:block}}
+</style>
+<header><strong>Agent security lab</strong><span>OpenShift · Secure Agent Workspace · NeMo Guardrails</span></header>
+<main>
+<div class="eyebrow">Workshop finale</div>
+<h1>See the model boundary work.</h1>
+<p>Send a normal request, inspect a rail decision, and compare a policy change with its restored baseline.</p>
+<div class="layers">
+<div class="card"><b>01 / Runtime</b><p>OpenShell controls tool execution and network access. Verify these controls in the sandbox operator view.</p></div>
+<div class="card"><b>02 / Workspace</b><p>SAW adds the VM, identity, secrets, and governance. Run the agent and SRE incident demo in their own UIs.</p></div>
+<div class="card"><b>03 / Model</b><p>This client calls the real guardrails service. Inspect its structured decisions and guarded completions below.</p></div>
+</div>
+<div class="badge" id="health">Checking guardrails connection…</div>
+<div class="layout">
+<section class="work"><h2>Try a request</h2><p>Use synthetic data for the demonstration.</p>
+<div class="examples"><button data-example="benign">Benign question</button><button data-example="pii">Synthetic PII</button><button data-example="keyword">Keyword rule</button><button data-example="atlas">Live rule</button></div>
+<label for="prompt">Prompt</label><textarea id="prompt" maxlength="8000">Name the capital of France.</textarea>
+<div class="actions"><button class="primary" id="chat">Send guarded chat</button><button id="check">Check input rails</button></div>
+<div id="status" role="status" aria-live="polite">Ready</div>
+<p class="note">A rail refusal can return HTTP 200. Use “Check input rails” for the exact status and rail; a completion alone does not identify which rail ran.</p></section>
+<section class="work"><h2>Observed result</h2><div class="output" id="answer">Your result will appear here.</div><details><summary>Backend response</summary><pre id="raw"></pre></details>
+<p class="note">The model credential stays in the guardrails service. This client stores no chat history and executes no tools.</p></section>
+</div>
+<footer>Input checks and chat are separate requests. Rail results are shown as returned by the server. Main-model invocation evidence belongs in the operator audit.</footer>
+</main><script src="/app.js" defer></script>
+</html>

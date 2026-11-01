@@ -1,0 +1,26 @@
+# OpenShell 0.1.2 local lab: TLS and a mandatory client certificate protect
+# transport. The Kubernetes driver uses a trusted local developer principal.
+# Reuse an existing compatible gateway instead of applying this over it.
+fullnameOverride: openshell-openclaw
+global:
+  image:
+    tag: 0.1.2
+podSecurityContext: null
+securityContext:
+  runAsNonRoot: true
+  runAsUser: null
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+server:
+  disableTls: false
+  tls:
+    enableMtls: true
+  auth:
+    allowUnauthenticatedUsers: true
+pkiInitJob:
+  enabled: true
+networkPolicy:
+  enabled: true
+openshiftRoute:
+  enabled: false

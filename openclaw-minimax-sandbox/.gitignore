@@ -1,0 +1,11 @@
+client-config/
+inputs/
+image/
+evidence/
+*.kubeconfig
+*.key
+*.crt
+*.pem
+starter/
+openshell-source/
+bin/openshell

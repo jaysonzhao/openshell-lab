@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-policy-echo
+  labels:
+    app: openclaw-policy-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openclaw-policy-echo
+  template:
+    metadata:
+      labels:
+        app: openclaw-policy-echo
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: REPLACE_WITH_OPENCLAW_IMAGE_DIGEST
+          command: [/usr/local/bin/node]
+          args:
+            - -e
+            - |
+              require('node:http').createServer((req, res) => {
+                res.writeHead(200, {'content-type': 'text/plain'});
+                res.end('policy-echo-ok\n');
+              }).listen(8080, '0.0.0.0');
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openclaw-policy-echo
+  labels:
+    app: openclaw-policy-echo
+spec:
+  selector:
+    app: openclaw-policy-echo
+  ports:
+    - port: 8080
+      targetPort: http

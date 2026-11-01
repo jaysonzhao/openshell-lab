@@ -1,0 +1,24 @@
+id: openclaw-model
+display_name: OpenClaw model endpoint
+description: Endpoint-bound model credential for the pod-only OpenClaw lab
+category: inference
+inference_capable: true
+credentials:
+- name: api_key
+  env_vars:
+  - VLLM_API_KEY
+  required: true
+  auth_style: bearer
+  header_name: authorization
+discovery:
+  credentials:
+  - api_key
+endpoints:
+- host: api.minimax.io
+  port: 443
+  path: /v1/**
+  protocol: rest
+  access: read-write
+  enforcement: enforce
+binaries:
+- /usr/local/bin/node

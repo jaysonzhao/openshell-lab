@@ -1,0 +1,31 @@
+fullnameOverride: openshell-openclaw
+global:
+  image:
+    tag: 0.1.2
+podSecurityContext: null
+securityContext:
+  runAsNonRoot: true
+  runAsUser: null
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+server:
+  disableTls: false
+  tls:
+    enableMtls: true
+  auth:
+    allowUnauthenticatedUsers: true
+  workspaceStorageClass: gp3-csi
+pkiInitJob:
+  enabled: true
+  serverDnsNames:
+  - openshell-openclaw-gateway.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com
+networkPolicy:
+  enabled: true
+openshiftRoute:
+  enabled: true
+  host: openshell-openclaw-gateway.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com
+  annotations:
+    haproxy.router.openshift.io/timeout: 300s
+    haproxy.router.openshift.io/timeout-tunnel: 300s

@@ -1,0 +1,48 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: openclaw-sandbox
+  namespace: openshell-openclaw
+  labels:
+    app.kubernetes.io/part-of: openclaw-minimax-sandbox
+spec:
+  lookupPolicy:
+    local: false
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: openclaw-sandbox
+  namespace: openshell-openclaw
+  labels:
+    app.kubernetes.io/part-of: openclaw-minimax-sandbox
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Containerfile.openshell
+      from:
+        kind: DockerImage
+        name: quay.io/hmoghani/openshell-base@sha256:663ff53941b7442c26f31af2922553d7a80896583517db69740a7bed76625f42
+      buildArgs:
+        - name: NODE_VERSION
+          value: "24.21.0"
+        - name: OPENCLAW_VERSION
+          value: "2026.9.8"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: openclaw-sandbox:starter-e3b20b1
+  resources:
+    requests:
+      cpu: 1
+      memory: 2Gi
+    limits:
+      cpu: 4
+      memory: 6Gi
+  nodeSelector:
+    kubernetes.io/arch: amd64

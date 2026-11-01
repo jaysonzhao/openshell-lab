@@ -1,0 +1,48 @@
+{
+  "gateway": {
+    "port": 18789,
+    "bind": "loopback",
+    "mode": "local",
+    "auth": {
+      "mode": "none"
+    }
+  },
+  "channels": {},
+  "agents": {
+    "defaults": {
+      "model": "vllm/MiniMax-M2.7",
+      "sandbox": {
+        "mode": "off"
+      }
+    }
+  },
+  "models": {
+    "mode": "replace",
+    "providers": {
+      "vllm": {
+        "baseUrl": "https://api.minimax.io/v1",
+        "api": "openai-completions",
+        "apiKey": "${VLLM_API_KEY}",
+        "models": [
+          {
+            "id": "MiniMax-M2.7",
+            "name": "MiniMax-M2.7",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 32768,
+            "maxTokens": 4096
+          }
+        ]
+      }
+    }
+  },
+  "plugins": {},
+  "tools": {
+    "deny": [
+      "group:web",
+      "browser"
+    ]
+  }
+}

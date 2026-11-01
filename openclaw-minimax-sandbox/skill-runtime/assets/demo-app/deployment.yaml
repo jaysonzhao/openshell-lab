@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-security-demo
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-security-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-security-demo
+  template:
+    metadata:
+      labels:
+        app: agent-security-demo
+    spec:
+      serviceAccountName: agent-security-demo
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: REPLACE_WITH_BUILT_IMAGE_DIGEST
+          ports:
+            - containerPort: 8080
+          env:
+            - name: BIND_ADDRESS
+              value: 0.0.0.0
+            - name: GUARDRAILS_BASE_URL
+              value: REPLACE_WITH_GUARDRAILS_SERVICE_URL_V1
+            - name: MODEL_NAME
+              value: REPLACE_WITH_MODEL_NAME
+            - name: GUARDRAILS_CONFIG_ID
+              value: nemo-guardrails-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: '1'
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            timeoutSeconds: 5
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-security-demo
+spec:
+  selector:
+    app: agent-security-demo
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
