@@ -1,0 +1,42 @@
+{
+  "filesystem_policy": {
+    "include_workdir": false,
+    "read_only": [
+      "/bin",
+      "/usr",
+      "/lib",
+      "/proc",
+      "/dev/urandom",
+      "/app",
+      "/etc",
+      "/var/log",
+      "/opt"
+    ],
+    "read_write": [
+      "/sandbox",
+      "/tmp",
+      "/var/tmp",
+      "/dev/null"
+    ]
+  },
+  "landlock": {
+    "compatibility": "hard_requirement"
+  },
+  "network_policies": {
+    "model_endpoint": {
+      "binaries": [
+        {
+          "path": "/usr/local/bin/node"
+        }
+      ],
+      "endpoints": [
+        {
+          "host": "api.minimax.io",
+          "port": 443
+        }
+      ],
+      "name": "model_endpoint"
+    }
+  },
+  "version": 1
+}
